@@ -59,7 +59,12 @@ def parse_args() -> argparse.Namespace:
                     help="pivot_r1_rejection: which pivot level to use as the take-profit target")
     p.add_argument("--capital", type=float, default=settings.initial_capital)
     p.add_argument("--leverage", type=float, default=settings.leverage)
-    p.add_argument("--allocation-pct", type=float, default=settings.allocation_pct)
+    p.add_argument("--allocation-pct", type=float, default=settings.allocation_pct,
+                    help="Fixed sizing: %% of equity used as margin per trade. Ignored if --risk-pct-per-trade is set.")
+    p.add_argument("--risk-pct-per-trade", type=float, default=None,
+                    help="pivot_r1_rejection only: size each trade so a stop-out loses exactly this %% of "
+                         "current equity, e.g. 1 for 1%% risk. Position size = (equity * risk%%) / |entry - stop|, "
+                         "capped by --leverage's buying power. Overrides --allocation-pct when set.")
     p.add_argument("--maker", action="store_true", help="Assume maker fees instead of taker")
     p.add_argument("--no-cache", action="store_true", help="Bypass the local candle cache")
     p.add_argument("--no-csv", action="store_true", help="Skip writing the per-trade CSV to sol_backtest/results/")
@@ -97,6 +102,9 @@ def main() -> None:
     )
 
     if strategy_info["kind"] == "signal":
+        if args.risk_pct_per_trade is not None:
+            print("Warning: --risk-pct-per-trade has no effect on signal-kind strategies "
+                  "(no stop level to size against) - ignoring it, using --allocation-pct instead.")
         signals = strategy.generate_signals(df)
         backtester = Backtester(
             fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
@@ -109,6 +117,7 @@ def main() -> None:
         backtester = PatternBacktester(
             fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
             allocation_pct=args.allocation_pct, assume_maker_fees=args.maker,
+            risk_pct_per_trade=args.risk_pct_per_trade,
         )
         result = backtester.run(df, setups)
 
@@ -121,6 +130,11 @@ def main() -> None:
     print(f"Strategy: {args.strategy}  |  {args.symbol} {args.resolution}  |  {args.start} -> {args.end}")
     print(f"Fees assumed: {fee_side} {fee_pct}% + {settings.gst_pct}% GST on the fee "
           f"(source: delta.exchange/fees, perpetual futures schedule)")
+    if strategy_info["kind"] == "pattern" and args.risk_pct_per_trade is not None:
+        print(f"Position sizing: {args.risk_pct_per_trade}% equity risk per trade "
+              f"(capped at {args.leverage}x equity buying power)")
+    else:
+        print(f"Position sizing: {args.allocation_pct}% of equity as margin, {args.leverage}x leverage")
     print("=" * 60)
     print(f"Initial capital:      {metrics['initial_capital']:,.2f}")
     print(f"Final equity:         {metrics['final_equity']:,.2f}")

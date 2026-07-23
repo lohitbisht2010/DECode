@@ -38,18 +38,41 @@ class PatternBacktester:
         leverage: float = 1.0,
         allocation_pct: float = 100.0,
         assume_maker_fees: bool = False,
+        risk_pct_per_trade: Optional[float] = None,
     ):
+        """risk_pct_per_trade: if set, position size is derived from the
+        stop distance so a stop-out loses exactly this % of current equity
+        (before fees/slippage) - qty = (equity * risk_pct/100) / |entry -
+        stop|. Capped at the notional `leverage * equity` would otherwise
+        allow, so a very tight stop can't imply an unbounded position.
+        When None (default), falls back to the old fixed allocation_pct *
+        leverage sizing, which ignores the stop distance entirely.
+        """
         self.fee_model = fee_model
         self.initial_capital = initial_capital
         self.leverage = leverage
         self.allocation_pct = allocation_pct
         self.is_maker = assume_maker_fees
+        self.risk_pct_per_trade = risk_pct_per_trade
 
     def _open(self, equity: float, price: float, direction: int, time: int,
-              stop_price: float, target_price: float) -> PatternTrade:
-        margin = equity * (self.allocation_pct / 100.0)
-        notional = margin * self.leverage
-        qty = notional / price
+              stop_price: float, target_price: float) -> Optional[PatternTrade]:
+        if self.risk_pct_per_trade is not None:
+            stop_distance = abs(price - stop_price)
+            if stop_distance <= 0:
+                return None  # stop coincides with entry - undefined risk, skip the trade
+            risk_amount = equity * (self.risk_pct_per_trade / 100.0)
+            qty = risk_amount / stop_distance
+            max_notional = equity * self.leverage
+            notional = qty * price
+            if notional > max_notional:
+                qty = max_notional / price
+                notional = max_notional
+        else:
+            margin = equity * (self.allocation_pct / 100.0)
+            notional = margin * self.leverage
+            qty = notional / price
+
         fee = self.fee_model.fee_for_trade(notional, self.is_maker)
         return PatternTrade(
             direction=direction, entry_time=time, entry_price=price, qty=qty,
@@ -91,7 +114,8 @@ class PatternBacktester:
                 direction, stop_price, target_price = pending_entry
                 if not (pd.isna(stop_price) or pd.isna(target_price)):
                     open_trade = self._open(equity, opens[i], direction, times[i], stop_price, target_price)
-                    equity -= open_trade.entry_fee
+                    if open_trade is not None:
+                        equity -= open_trade.entry_fee
                 pending_entry = None
 
             if open_trade is not None:

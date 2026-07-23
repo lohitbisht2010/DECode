@@ -151,6 +151,12 @@ python -m sol_backtest.main \
   --start 2025-01-01 --end 2026-01-01 \
   --resolution 15m --strategy pivot_r1_rejection --target-level s1 \
   --capital 10000 --leverage 1 --allocation-pct 100
+
+# 1% equity risk per trade instead of fixed allocation (pattern strategies only)
+python -m sol_backtest.main \
+  --start 2025-01-01 --end 2026-01-01 \
+  --resolution 15m --strategy pivot_r1_rejection --target-level s1 \
+  --capital 10000 --leverage 5 --risk-pct-per-trade 1
 ```
 
 Use `--maker` to assume maker (limit, liquidity-adding) fees instead of
@@ -159,6 +165,31 @@ production. Candle data is cached under `sol_backtest/data/cache/` keyed
 by symbol/resolution/date-range, so re-running the same window doesn't
 re-hit the API.
 
+## Position sizing: fixed allocation vs. risk-based
+
+Two sizing modes for pattern strategies (`PatternBacktester`):
+
+- **Fixed allocation** (default): `notional = equity * allocation_pct/100 *
+  leverage`. Position size doesn't depend on the stop distance, so a
+  tight-stop trade and a wide-stop trade risk very different amounts.
+- **Risk-based** (`--risk-pct-per-trade N`): position size is derived
+  *from* the stop distance so a stop-out loses exactly N% of current
+  equity (before fees) — `qty = (equity * N/100) / |entry_price -
+  stop_price|`. This is the standard "1% risk per trade" sizing rule.
+  Capped at the notional `leverage * equity` would otherwise allow the
+  position to have, so an unusually tight stop can't imply an absurd
+  position size; if the stop exactly equals the entry price (undefined
+  risk), that trade is skipped entirely. `--leverage` still matters here —
+  it sets the cap, not the size — so give it enough headroom (e.g. `5`)
+  that tight-stop trades aren't clipped below their intended risk.
+- `--allocation-pct` is ignored once `--risk-pct-per-trade` is set.
+- This only applies to pattern strategies (a stop level is required to
+  compute risk); it has no effect on `sma_crossover` and prints a warning
+  if you set it there anyway.
+- Fee cost isn't included in the risk calculation — a stop-out's actual
+  loss is the intended risk amount plus entry/exit fees, so realized loss
+  will run slightly over N%.
+
 ## Tests
 
 ```bash
@@ -166,13 +197,14 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-29 tests covering: fee calculation (GST, maker vs taker, absolute
+32 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
-double-fee-counting bug caught during development), fetcher
-pagination/caching, pivot point formulas, the R1 rejection pattern's
-condition-by-condition detection, and the trade CSV export — all against
-synthetic data, no live
+double-fee-counting bug caught during development), risk-based position
+sizing (hand-verified stop-out losses exactly N% of equity, leverage
+capping, zero-stop-distance handling), fetcher pagination/caching, pivot
+point formulas, the R1 rejection pattern's condition-by-condition
+detection, and the trade CSV export — all against synthetic data, no live
 API access required.
 
 ## Known limitations

@@ -123,6 +123,68 @@ def test_no_signal_never_opens_a_trade():
     assert result.final_equity == 10000
 
 
+def test_risk_based_sizing_matches_hand_calculation():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 105.0],
+        "high": [100.0, 101.0, 106.0],
+        "low": [100.0, 99.0, 104.0],
+        "close": [100.0, 100.0, 105.0],
+        "volume": [1, 1, 1],
+    })
+    # entry at 100, stop at 105 -> risk 5/unit. 1% of 10000 = 100 risk -> qty = 100/5 = 20
+    setups = _setups(3, signal_index=0, stop=105.0, target=90.0)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=10,
+                            allocation_pct=100, risk_pct_per_trade=1.0)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    assert abs(trade.qty - 20.0) < 1e-9
+    # stopped out -> loss should be exactly 1% of starting equity (100), before fees
+    assert abs(trade.gross_pnl - (-100.0)) < 1e-6
+    assert abs(result.final_equity - 9900.0) < 1e-6
+
+
+def test_risk_based_sizing_capped_by_leverage_buying_power():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 100.1],
+        "high": [100.0, 101.0, 100.2],
+        "low": [100.0, 99.0, 99.0],
+        "close": [100.0, 100.0, 99.5],
+        "volume": [1, 1, 1],
+    })
+    # stop only 0.01 away -> uncapped qty would be (100 * 0.01) / 0.01 = 100 -> notional 10,000
+    # but leverage=1 caps buying power at equity (10000), so qty should cap at 10000/100=100...
+    # use a tighter risk to force the cap: 10% risk with a 0.01 stop distance -> huge desired qty.
+    setups = _setups(3, signal_index=0, stop=100.01, target=90.0)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, risk_pct_per_trade=10.0)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    max_qty = (10000 * 1) / 100.0  # equity * leverage / price
+    assert abs(trade.qty - max_qty) < 1e-6
+
+
+def test_risk_based_sizing_skips_trade_when_stop_equals_entry():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 100.0],
+        "high": [100.0, 101.0, 101.0],
+        "low": [100.0, 99.0, 99.0],
+        "close": [100.0, 100.0, 100.0],
+        "volume": [1, 1, 1],
+    })
+    # stop == entry price -> zero stop distance, undefined risk sizing
+    setups = _setups(3, signal_index=0, stop=100.0, target=90.0)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, risk_pct_per_trade=1.0)
+    result = bt.run(df, setups)
+    assert result.trades == []
+    assert result.final_equity == 10000
+
+
 def test_open_trade_force_closed_at_end_of_data():
     df = pd.DataFrame({
         "time": [0, 900, 1800],
