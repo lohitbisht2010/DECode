@@ -11,18 +11,24 @@ immediately before it):
 
 R1 comes from the previous UTC day's daily pivot (pivots.py). Trade plan:
 short at the next bar's open, stop at the signal bar's high (pattern
-invalidated if price keeps going), target at the daily pivot line (PP) -
-the classic "fade back to the pivot" trade.
+invalidated if price keeps going), target at a configurable pivot level
+(defaults to PP, the "fade back to the pivot" trade; pass target_level="s1"
+for a deeper fade to the first support level).
 """
 import pandas as pd
 
 from sol_backtest.pivots import attach_previous_day_pivots
 from sol_backtest.strategies.pattern_base import PatternStrategy
 
+VALID_TARGET_LEVELS = {"pp", "r1", "r2", "r3", "s1", "s2", "s3"}
+
 
 class PivotR1RejectionStrategy(PatternStrategy):
-    def __init__(self, daily_df: pd.DataFrame):
+    def __init__(self, daily_df: pd.DataFrame, target_level: str = "pp"):
+        if target_level not in VALID_TARGET_LEVELS:
+            raise ValueError(f"target_level must be one of {sorted(VALID_TARGET_LEVELS)}, got {target_level!r}")
         self.daily_df = daily_df
+        self.target_level = target_level
 
     def generate_setups(self, df: pd.DataFrame) -> pd.DataFrame:
         merged = attach_previous_day_pivots(df, self.daily_df)
@@ -44,5 +50,5 @@ class PivotR1RejectionStrategy(PatternStrategy):
         out["entry_signal"] = pattern.fillna(False)
         out["direction"] = -1
         out["stop_price"] = merged["high"]
-        out["target_price"] = merged["pivot_pp"]
+        out["target_price"] = merged[f"pivot_{self.target_level}"]
         return out

@@ -19,6 +19,7 @@ from sol_backtest.backtest.pattern_engine import PatternBacktester, PatternTrade
 from sol_backtest.config import RESOLUTION_SECONDS, base_url_for, settings
 from sol_backtest.data.fetcher import fetch_candles
 from sol_backtest.fees import FeeModel
+from sol_backtest.reporting import save_trades_csv
 from sol_backtest.strategies.pivot_r1_rejection import PivotR1RejectionStrategy
 from sol_backtest.strategies.sma_crossover import SmaCrossoverStrategy
 
@@ -33,7 +34,7 @@ STRATEGIES = {
     },
     "pivot_r1_rejection": {
         "kind": "pattern",
-        "factory": lambda args, daily_df: PivotR1RejectionStrategy(daily_df),
+        "factory": lambda args, daily_df: PivotR1RejectionStrategy(daily_df, target_level=args.target_level),
     },
 }
 
@@ -54,11 +55,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--strategy", default="sma_crossover", choices=sorted(STRATEGIES))
     p.add_argument("--fast", type=int, default=10, help="SMA crossover: fast period")
     p.add_argument("--slow", type=int, default=30, help="SMA crossover: slow period")
+    p.add_argument("--target-level", default="pp", choices=["pp", "r1", "r2", "r3", "s1", "s2", "s3"],
+                    help="pivot_r1_rejection: which pivot level to use as the take-profit target")
     p.add_argument("--capital", type=float, default=settings.initial_capital)
     p.add_argument("--leverage", type=float, default=settings.leverage)
     p.add_argument("--allocation-pct", type=float, default=settings.allocation_pct)
     p.add_argument("--maker", action="store_true", help="Assume maker fees instead of taker")
     p.add_argument("--no-cache", action="store_true", help="Bypass the local candle cache")
+    p.add_argument("--no-csv", action="store_true", help="Skip writing the per-trade CSV to sol_backtest/results/")
     return p.parse_args()
 
 
@@ -137,6 +141,11 @@ def main() -> None:
     print(f"Net P&L (after fees): {metrics['net_pnl']:,.2f}")
     print(f"Fees as % of gross P&L: {metrics['fees_as_pct_of_gross_pnl']:.2f}%")
     print("=" * 60)
+
+    if not args.no_csv and result.trades:
+        filename = f"{args.strategy}_{args.symbol}_{args.resolution}_{args.start}_{args.end}.csv"
+        path = save_trades_csv(result.trades, filename)
+        print(f"\nPer-trade log written to: {path}")
 
 
 if __name__ == "__main__":

@@ -61,24 +61,22 @@ On the 15m timeframe, comparing each bar to the one immediately before it:
 R1 and PP come from the **previous UTC day's** daily pivot (classic
 floor-trader formula: `PP=(H+L+C)/3`, `R1=2*PP-L`, etc. — see `pivots.py`).
 Trade plan: **short at the next bar's open**, **stop at the signal bar's
-own high** (pattern invalidated if price keeps going), **target at the
-daily pivot line (PP)** — fading the rejection back toward the pivot.
-This runs through `PatternBacktester`, which checks the stop and target
-against every subsequent bar's high/low (not just the close) until one is
-hit; if both would be hit in the same bar, the stop is assumed to win
-(the conservative assumption, since intrabar order isn't knowable from
-OHLC data alone).
+own high** (pattern invalidated if price keeps going), **target at a
+pivot level** — defaults to PP (fade back to the pivot), configurable via
+`--target-level {pp,r1,r2,r3,s1,s2,s3}` (e.g. `--target-level s1` for a
+deeper fade to the first support level). This runs through
+`PatternBacktester`, which checks the stop and target against every
+subsequent bar's high/low (not just the close) until one is hit; if both
+would be hit in the same bar, the stop is assumed to win (the
+conservative assumption, since intrabar order isn't knowable from OHLC
+data alone).
 
-Two things worth confirming against your own read of the pattern:
-- *"prev open<close"* was read as "the previous bar's open is below its
-  close" (i.e. previous bar bullish) — the alternative parse ("previous
-  open below the *current* close") didn't fit the rest of the pattern.
-- *"target at the pivot line"* was read as the central pivot point (PP),
-  not S1 — PP is the level commonly called "the pivot" in floor-trader
-  terminology.
-
-If either of those isn't what you meant, they're both isolated one-line
-changes in `strategies/pivot_r1_rejection.py`.
+One thing worth confirming against your own read of the pattern:
+*"prev open<close"* was read as "the previous bar's open is below its
+close" (i.e. previous bar bullish) — the alternative parse ("previous
+open below the *current* close") didn't fit the rest of the pattern. If
+that's not what you meant, it's an isolated change in
+`strategies/pivot_r1_rejection.py`.
 
 ## Plugging in a different pattern
 
@@ -98,6 +96,35 @@ Either way, register the strategy in `main.py`'s `STRATEGIES` dict (with
 <name>`. Both engines execute on the bar *after* a signal, using only data
 available up to and including the signal bar — no lookahead.
 
+## Verifying individual trades
+
+Every run writes a per-trade CSV to `sol_backtest/results/` (pass
+`--no-csv` to skip it), named
+`{strategy}_{symbol}_{resolution}_{start}_{end}.csv`, e.g.
+`pivot_r1_rejection_SOLUSD_15m_2025-01-01_2026-01-01.csv`. One row per
+closed trade:
+
+| column | meaning |
+|---|---|
+| `entry_time` / `exit_time` | UTC timestamps of the fills |
+| `direction` | `long` or `short` |
+| `entry_price` / `exit_price` | fill prices used |
+| `qty` | position size in the underlying |
+| `entry_fee` / `exit_fee` | fee charged on each leg (incl. GST) |
+| `gross_pnl` / `net_pnl` | before/after fees |
+| `stop_price` / `target_price` / `exit_reason` | pattern strategies only — `exit_reason` is `stop`, `target`, or `eod_forced` |
+
+Cross-check a row against the source data with, e.g.:
+
+```bash
+python -c "
+from sol_backtest.data.fetcher import fetch_candles
+from sol_backtest.config import base_url_for
+df = fetch_candles(base_url_for('production'), 'SOLUSD', '15m', <start_unix>, <end_unix>)
+print(df[(df.time >= <entry_unix> - 3600) & (df.time <= <entry_unix> + 3600)])
+"
+```
+
 ## Setup
 
 ```bash
@@ -116,7 +143,13 @@ python -m sol_backtest.main \
 # R1 rejection pattern (needs 15m bars; daily data for pivots is fetched automatically)
 python -m sol_backtest.main \
   --start 2025-01-01 --end 2026-01-01 \
-  --resolution 15m --strategy pivot_r1_rejection \
+  --resolution 15m --strategy pivot_r1_rejection --target-level pp \
+  --capital 10000 --leverage 1 --allocation-pct 100
+
+# same, but fading to S1 instead of the pivot
+python -m sol_backtest.main \
+  --start 2025-01-01 --end 2026-01-01 \
+  --resolution 15m --strategy pivot_r1_rejection --target-level s1 \
   --capital 10000 --leverage 1 --allocation-pct 100
 ```
 
@@ -133,12 +166,13 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-24 tests covering: fee calculation (GST, maker vs taker, absolute
+29 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
 double-fee-counting bug caught during development), fetcher
-pagination/caching, pivot point formulas, and the R1 rejection pattern's
-condition-by-condition detection — all against synthetic data, no live
+pagination/caching, pivot point formulas, the R1 rejection pattern's
+condition-by-condition detection, and the trade CSV export — all against
+synthetic data, no live
 API access required.
 
 ## Known limitations

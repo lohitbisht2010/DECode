@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from sol_backtest.strategies.pivot_r1_rejection import PivotR1RejectionStrategy
 
@@ -83,3 +84,16 @@ def test_no_signal_when_current_bar_is_bullish():
     df = _df_from(bars["prev"], cur, bars["time"])
     setups = PivotR1RejectionStrategy(_daily_df()).generate_setups(df)
     assert not setups.loc[1, "entry_signal"]
+
+
+def test_target_level_s1_uses_support_one_instead_of_pivot():
+    bars = _base_bars()
+    df = _df_from(bars["prev"], bars["cur"], bars["time"])
+    setups = PivotR1RejectionStrategy(_daily_df(), target_level="s1").generate_setups(df)
+    # day0: H=110, L=90, PP=100 -> S1 = 2*100 - 110 = 90
+    assert abs(setups.loc[1, "target_price"] - 90.0) < 1e-9
+
+
+def test_invalid_target_level_rejected():
+    with pytest.raises(ValueError):
+        PivotR1RejectionStrategy(_daily_df(), target_level="not_a_level")

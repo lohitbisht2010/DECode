@@ -6,3 +6,4 @@ venv/
 .pytest_cache/
 *.egg-info/
 sol_backtest/data/cache/
+sol_backtest/results/
