@@ -8,6 +8,9 @@ Examples:
 
     python -m sol_backtest.main --start 2025-01-01 --end 2026-01-01 \
         --resolution 15m --strategy pivot_r1_rejection
+
+    python -m sol_backtest.main --start 2025-01-01 --end 2026-01-01 \
+        --resolution 15m --strategy pivot_r1_breakout
 """
 import argparse
 from collections import Counter
@@ -20,6 +23,7 @@ from sol_backtest.config import RESOLUTION_SECONDS, base_url_for, settings
 from sol_backtest.data.fetcher import fetch_candles
 from sol_backtest.fees import FeeModel
 from sol_backtest.reporting import save_trades_csv
+from sol_backtest.strategies.pivot_r1_breakout import PivotR1BreakoutStrategy
 from sol_backtest.strategies.pivot_r1_rejection import PivotR1RejectionStrategy
 from sol_backtest.strategies.sma_crossover import SmaCrossoverStrategy
 
@@ -27,14 +31,24 @@ from sol_backtest.strategies.sma_crossover import SmaCrossoverStrategy
 #       "pattern" strategies implement generate_setups (entry/stop/target) and
 #       run through PatternBacktester, and additionally need daily OHLC to
 #       compute pivot levels.
+# default_target_level: used to fill in --target-level when the user didn't
+#       pass one explicitly (rejection fades back down to PP; breakout's
+#       next target is naturally above R1, so PP/S1 wouldn't make sense).
 STRATEGIES = {
     "sma_crossover": {
         "kind": "signal",
         "factory": lambda args, daily_df: SmaCrossoverStrategy(fast=args.fast, slow=args.slow),
+        "default_target_level": None,
     },
     "pivot_r1_rejection": {
         "kind": "pattern",
         "factory": lambda args, daily_df: PivotR1RejectionStrategy(daily_df, target_level=args.target_level),
+        "default_target_level": "pp",
+    },
+    "pivot_r1_breakout": {
+        "kind": "pattern",
+        "factory": lambda args, daily_df: PivotR1BreakoutStrategy(daily_df, target_level=args.target_level),
+        "default_target_level": "r2",
     },
 }
 
@@ -55,18 +69,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--strategy", default="sma_crossover", choices=sorted(STRATEGIES))
     p.add_argument("--fast", type=int, default=10, help="SMA crossover: fast period")
     p.add_argument("--slow", type=int, default=30, help="SMA crossover: slow period")
-    p.add_argument("--target-level", default="pp", choices=["pp", "r1", "r2", "r3", "s1", "s2", "s3"],
-                    help="pivot_r1_rejection: which pivot level to use as the take-profit target")
+    p.add_argument("--target-level", default=None, choices=["pp", "r1", "r2", "r3", "s1", "s2", "s3"],
+                    help="pivot strategies: which pivot level to use as the take-profit target. "
+                         "Defaults to PP for pivot_r1_rejection, R2 for pivot_r1_breakout.")
     p.add_argument("--capital", type=float, default=settings.initial_capital)
     p.add_argument("--leverage", type=float, default=settings.leverage)
     p.add_argument("--allocation-pct", type=float, default=settings.allocation_pct,
                     help="Fixed sizing: %% of equity used as margin per trade. Ignored if --risk-pct-per-trade is set.")
     p.add_argument("--risk-pct-per-trade", type=float, default=None,
-                    help="pivot_r1_rejection only: size each trade so a stop-out loses exactly this %% of "
-                         "current equity, e.g. 1 for 1%% risk. Position size = (equity * risk%%) / |entry - stop|, "
-                         "capped by --leverage's buying power. Overrides --allocation-pct when set.")
+                    help="Pattern strategies only (pivot_r1_rejection, pivot_r1_breakout): size each trade so "
+                         "a stop-out loses exactly this %% of current equity, e.g. 1 for 1%% risk. Position size "
+                         "= (equity * risk%%) / |entry - stop|, capped by --leverage's buying power. Overrides "
+                         "--allocation-pct when set.")
     p.add_argument("--reward-multiple", type=float, default=None,
-                    help="pivot_r1_rejection only: place the take-profit target this many multiples of the "
+                    help="Pattern strategies only: place the take-profit target this many multiples of the "
                          "stop distance from the actual entry price, overriding --target-level's pivot-based "
                          "target. E.g. with --risk-pct-per-trade 1, --reward-multiple 4 means a stop-out loses "
                          "1%% of equity and hitting target gains 4%% - a 1:4 risk:reward setup.")
@@ -81,6 +97,9 @@ def main() -> None:
     start, end = _to_unix(args.start), _to_unix(args.end)
     strategy_info = STRATEGIES[args.strategy]
     base_url = base_url_for(args.env)
+
+    if args.target_level is None:
+        args.target_level = strategy_info["default_target_level"]
 
     print(f"Fetching {args.symbol} [{args.resolution}] candles from {args.start} to {args.end} ({args.env})...")
     df = fetch_candles(

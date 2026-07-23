@@ -9,6 +9,8 @@ as "no signal".
 """
 import pandas as pd
 
+VALID_PIVOT_LEVELS = {"pp", "r1", "r2", "r3", "s1", "s2", "s3"}
+
 
 def compute_daily_pivots(daily_df: pd.DataFrame) -> pd.DataFrame:
     """daily_df: OHLCV with columns [time, open, high, low, close, volume].

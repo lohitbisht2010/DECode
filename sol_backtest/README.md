@@ -20,6 +20,7 @@ strategies/base.py            Strategy interface: generate_signals(df) -> Series
 strategies/pattern_base.py     PatternStrategy interface: generate_setups(df) -> entry/stop/target
 strategies/sma_crossover.py    Placeholder demo strategy for the signal-based engine
 strategies/pivot_r1_rejection.py  R1 rejection outside-bar pattern (see below)
+strategies/pivot_r1_breakout.py   R1 breakout continuation pattern (see below)
 main.py                   CLI: fetch -> backtest -> report (picks engine by strategy kind)
 tests/                     Unit tests for fees, both engines, pivots, and pattern detection
 ```
@@ -77,6 +78,32 @@ close" (i.e. previous bar bullish) — the alternative parse ("previous
 open below the *current* close") didn't fit the rest of the pattern. If
 that's not what you meant, it's an isolated change in
 `strategies/pivot_r1_rejection.py`.
+
+## Strategy: R1 breakout continuation (`pivot_r1_breakout`)
+
+The opposite thesis: instead of fading a failed poke through R1, trade
+*with* momentum once R1 breaks with conviction. Same 15m/previous-bar
+comparison structure:
+
+1. `previous.close <= R1` — R1 not yet broken as of the prior close
+2. `current.close   >  R1` — breakout confirmed by close, not just a wick through
+3. `current.open    <  current.close` — bullish/strength candle
+4. `current.high    >  previous.high` — making a new high, momentum continuing
+
+Condition 1 restricts signals to the *first* bar that closes through R1,
+so the pattern doesn't keep re-firing on every bar price simply holds
+above it. Trade plan: **long at the next bar's open**, **stop at the
+breakout bar's own low** (invalidated if price falls back below it),
+**target at a pivot level** — defaults to **R2** rather than PP, since
+PP/S1 sit *behind* a long entry here and wouldn't make sense as a target
+(configurable via the same `--target-level`).
+
+This is why fee drag matters for strategy selection: a rejection/fade
+trades against the immediate move with a tight target near the pivot
+(many round trips, small average win), while a breakout trades with the
+move and can target the next resistance level out or run a wider
+`--reward-multiple` (fewer, larger wins) — see the "which strategy suits
+this fee schedule" discussion this was built to test.
 
 ## Plugging in a different pattern
 
@@ -163,6 +190,12 @@ python -m sol_backtest.main \
   --start 2025-01-01 --end 2026-01-01 \
   --resolution 15m --strategy pivot_r1_rejection \
   --capital 10000 --leverage 10 --risk-pct-per-trade 1 --reward-multiple 4
+
+# R1 breakout continuation (defaults to targeting R2, not PP)
+python -m sol_backtest.main \
+  --start 2025-01-01 --end 2026-01-01 \
+  --resolution 15m --strategy pivot_r1_breakout \
+  --capital 10000 --leverage 5 --risk-pct-per-trade 1
 ```
 
 Use `--maker` to assume maker (limit, liquidity-adding) fees instead of
@@ -216,7 +249,7 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-35 tests covering: fee calculation (GST, maker vs taker, absolute
+42 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
 double-fee-counting bug caught during development), risk-based position
@@ -224,8 +257,8 @@ sizing (hand-verified stop-out losses exactly N% of equity, leverage
 capping, zero-stop-distance handling), the fixed risk:reward target
 (hand-verified against long/short entry prices, and a combined 1%-risk/
 4%-target scenario), fetcher pagination/caching, pivot point formulas,
-the R1 rejection pattern's condition-by-condition detection, and the
-trade CSV export — all against synthetic data, no live
+both the R1 rejection and R1 breakout patterns' condition-by-condition
+detection, and the trade CSV export — all against synthetic data, no live
 API access required.
 
 ## Known limitations
