@@ -39,6 +39,7 @@ class PatternBacktester:
         allocation_pct: float = 100.0,
         assume_maker_fees: bool = False,
         risk_pct_per_trade: Optional[float] = None,
+        reward_multiple: Optional[float] = None,
     ):
         """risk_pct_per_trade: if set, position size is derived from the
         stop distance so a stop-out loses exactly this % of current equity
@@ -47,6 +48,15 @@ class PatternBacktester:
         allow, so a very tight stop can't imply an unbounded position.
         When None (default), falls back to the old fixed allocation_pct *
         leverage sizing, which ignores the stop distance entirely.
+
+        reward_multiple: if set, the take-profit target is placed this many
+        times the stop distance away from the *actual fill price* (not the
+        setup's target_price, which gets ignored) - e.g. 4 means the target
+        is 4x further from entry than the stop, so hitting it gains 4x
+        whatever hitting the stop would have lost. Combine with
+        risk_pct_per_trade=1 and reward_multiple=4 for "risk 1%, target 4%"
+        sizing. When None (default), the setup's own target_price is used
+        (e.g. a pivot level).
         """
         self.fee_model = fee_model
         self.initial_capital = initial_capital
@@ -54,15 +64,17 @@ class PatternBacktester:
         self.allocation_pct = allocation_pct
         self.is_maker = assume_maker_fees
         self.risk_pct_per_trade = risk_pct_per_trade
+        self.reward_multiple = reward_multiple
 
     def _open(self, equity: float, price: float, direction: int, time: int,
               stop_price: float, target_price: float) -> Optional[PatternTrade]:
+        risk_per_unit = abs(price - stop_price)
+
         if self.risk_pct_per_trade is not None:
-            stop_distance = abs(price - stop_price)
-            if stop_distance <= 0:
+            if risk_per_unit <= 0:
                 return None  # stop coincides with entry - undefined risk, skip the trade
             risk_amount = equity * (self.risk_pct_per_trade / 100.0)
-            qty = risk_amount / stop_distance
+            qty = risk_amount / risk_per_unit
             max_notional = equity * self.leverage
             notional = qty * price
             if notional > max_notional:
@@ -72,6 +84,10 @@ class PatternBacktester:
             margin = equity * (self.allocation_pct / 100.0)
             notional = margin * self.leverage
             qty = notional / price
+
+        if self.reward_multiple is not None:
+            # short (direction=-1): target below entry. long (direction=1): target above entry.
+            target_price = price + direction * self.reward_multiple * risk_per_unit
 
         fee = self.fee_model.fee_for_trade(notional, self.is_maker)
         return PatternTrade(
@@ -112,7 +128,8 @@ class PatternBacktester:
         for i in range(len(df)):
             if pending_entry is not None and open_trade is None:
                 direction, stop_price, target_price = pending_entry
-                if not (pd.isna(stop_price) or pd.isna(target_price)):
+                target_required = self.reward_multiple is None
+                if not pd.isna(stop_price) and (not target_required or not pd.isna(target_price)):
                     open_trade = self._open(equity, opens[i], direction, times[i], stop_price, target_price)
                     if open_trade is not None:
                         equity -= open_trade.entry_fee

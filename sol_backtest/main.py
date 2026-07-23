@@ -65,6 +65,11 @@ def parse_args() -> argparse.Namespace:
                     help="pivot_r1_rejection only: size each trade so a stop-out loses exactly this %% of "
                          "current equity, e.g. 1 for 1%% risk. Position size = (equity * risk%%) / |entry - stop|, "
                          "capped by --leverage's buying power. Overrides --allocation-pct when set.")
+    p.add_argument("--reward-multiple", type=float, default=None,
+                    help="pivot_r1_rejection only: place the take-profit target this many multiples of the "
+                         "stop distance from the actual entry price, overriding --target-level's pivot-based "
+                         "target. E.g. with --risk-pct-per-trade 1, --reward-multiple 4 means a stop-out loses "
+                         "1%% of equity and hitting target gains 4%% - a 1:4 risk:reward setup.")
     p.add_argument("--maker", action="store_true", help="Assume maker fees instead of taker")
     p.add_argument("--no-cache", action="store_true", help="Bypass the local candle cache")
     p.add_argument("--no-csv", action="store_true", help="Skip writing the per-trade CSV to sol_backtest/results/")
@@ -102,9 +107,9 @@ def main() -> None:
     )
 
     if strategy_info["kind"] == "signal":
-        if args.risk_pct_per_trade is not None:
-            print("Warning: --risk-pct-per-trade has no effect on signal-kind strategies "
-                  "(no stop level to size against) - ignoring it, using --allocation-pct instead.")
+        if args.risk_pct_per_trade is not None or args.reward_multiple is not None:
+            print("Warning: --risk-pct-per-trade/--reward-multiple have no effect on signal-kind "
+                  "strategies (no stop level to size or target against) - ignoring them.")
         signals = strategy.generate_signals(df)
         backtester = Backtester(
             fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
@@ -117,7 +122,7 @@ def main() -> None:
         backtester = PatternBacktester(
             fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
             allocation_pct=args.allocation_pct, assume_maker_fees=args.maker,
-            risk_pct_per_trade=args.risk_pct_per_trade,
+            risk_pct_per_trade=args.risk_pct_per_trade, reward_multiple=args.reward_multiple,
         )
         result = backtester.run(df, setups)
 
@@ -135,6 +140,8 @@ def main() -> None:
               f"(capped at {args.leverage}x equity buying power)")
     else:
         print(f"Position sizing: {args.allocation_pct}% of equity as margin, {args.leverage}x leverage")
+    if strategy_info["kind"] == "pattern" and args.reward_multiple is not None:
+        print(f"Target: {args.reward_multiple}x the stop distance from entry (overrides --target-level)")
     print("=" * 60)
     print(f"Initial capital:      {metrics['initial_capital']:,.2f}")
     print(f"Final equity:         {metrics['final_equity']:,.2f}")

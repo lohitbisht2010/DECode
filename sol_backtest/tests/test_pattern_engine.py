@@ -185,6 +185,67 @@ def test_risk_based_sizing_skips_trade_when_stop_equals_entry():
     assert result.final_equity == 10000
 
 
+def test_reward_multiple_overrides_setup_target_for_short():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 80.0],
+        "high": [100.0, 101.0, 81.0],
+        "low": [100.0, 99.0, 79.0],
+        "close": [100.0, 100.0, 80.0],
+        "volume": [1, 1, 1],
+    })
+    # entry 100, stop 105 -> risk 5/unit; reward_multiple=4 -> target should be 100 - 4*5 = 80,
+    # NOT the setup's own target_price (90).
+    setups = _setups(3, signal_index=0, stop=105.0, target=90.0)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=10,
+                            allocation_pct=100, reward_multiple=4.0)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    assert abs(trade.target_price - 80.0) < 1e-9
+
+
+def test_reward_multiple_overrides_setup_target_for_long():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 120.0],
+        "high": [100.0, 101.0, 121.0],
+        "low": [100.0, 99.0, 119.0],
+        "close": [100.0, 100.0, 120.0],
+        "volume": [1, 1, 1],
+    })
+    # entry 100, stop 95 -> risk 5/unit; reward_multiple=4 -> target should be 100 + 4*5 = 120
+    setups = _setups(3, signal_index=0, stop=95.0, target=110.0, direction=1)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=10,
+                            allocation_pct=100, reward_multiple=4.0)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    assert abs(trade.target_price - 120.0) < 1e-9
+
+
+def test_risk_1pct_reward_4x_hits_target_for_4pct_equity_gain():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 80.0],
+        "high": [100.0, 101.0, 81.0],
+        "low": [100.0, 99.0, 79.0],
+        "close": [100.0, 100.0, 80.0],
+        "volume": [1, 1, 1],
+    })
+    # 1% risk sizing (qty = 100/5 = 20) + reward_multiple=4 (target=80) -> hitting target
+    # should gain exactly 4% of starting equity, before fees.
+    setups = _setups(3, signal_index=0, stop=105.0, target=999.0)  # setup target ignored
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=10,
+                            risk_pct_per_trade=1.0, reward_multiple=4.0)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    assert trade.exit_reason == "target"
+    assert abs(trade.gross_pnl - 400.0) < 1e-6  # 4% of 10000
+    assert abs(result.final_equity - 10400.0) < 1e-6
+
+
 def test_open_trade_force_closed_at_end_of_data():
     df = pd.DataFrame({
         "time": [0, 900, 1800],

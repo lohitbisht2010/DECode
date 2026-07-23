@@ -157,6 +157,12 @@ python -m sol_backtest.main \
   --start 2025-01-01 --end 2026-01-01 \
   --resolution 15m --strategy pivot_r1_rejection --target-level s1 \
   --capital 10000 --leverage 5 --risk-pct-per-trade 1
+
+# risk 1%, target 4% (1:4 risk:reward) - target overrides --target-level entirely
+python -m sol_backtest.main \
+  --start 2025-01-01 --end 2026-01-01 \
+  --resolution 15m --strategy pivot_r1_rejection \
+  --capital 10000 --leverage 10 --risk-pct-per-trade 1 --reward-multiple 4
 ```
 
 Use `--maker` to assume maker (limit, liquidity-adding) fees instead of
@@ -190,6 +196,19 @@ Two sizing modes for pattern strategies (`PatternBacktester`):
   loss is the intended risk amount plus entry/exit fees, so realized loss
   will run slightly over N%.
 
+### Fixed risk:reward target (`--reward-multiple`)
+
+Independent of sizing, `--reward-multiple N` replaces the pivot-based
+target (`--target-level`) with one placed `N` times the stop distance from
+the *actual fill price*: `target = entry ± N * |entry - stop|` (sign
+follows direction). Combined with `--risk-pct-per-trade 1
+--reward-multiple 4` ("risk 1%, target 4%"), a stop-out loses exactly 1%
+of equity and hitting target gains exactly 4% (both before fees) — a
+straightforward 1:4 R:R setup, decoupled from wherever the pivot happens
+to sit that day. `--reward-multiple` can be used with either sizing mode
+(it only changes where the target is, not the position size); like
+`--risk-pct-per-trade`, it's ignored (with a warning) for `sma_crossover`.
+
 ## Tests
 
 ```bash
@@ -197,14 +216,16 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-32 tests covering: fee calculation (GST, maker vs taker, absolute
+35 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
 double-fee-counting bug caught during development), risk-based position
 sizing (hand-verified stop-out losses exactly N% of equity, leverage
-capping, zero-stop-distance handling), fetcher pagination/caching, pivot
-point formulas, the R1 rejection pattern's condition-by-condition
-detection, and the trade CSV export — all against synthetic data, no live
+capping, zero-stop-distance handling), the fixed risk:reward target
+(hand-verified against long/short entry prices, and a combined 1%-risk/
+4%-target scenario), fetcher pagination/caching, pivot point formulas,
+the R1 rejection pattern's condition-by-condition detection, and the
+trade CSV export — all against synthetic data, no live
 API access required.
 
 ## Known limitations
