@@ -2,23 +2,42 @@
 through the backtester (with Delta's maker/taker + GST fee model applied),
 and print a performance report.
 
-Example:
+Examples:
     python -m sol_backtest.main --start 2025-01-01 --end 2026-01-01 \
         --resolution 1h --strategy sma_crossover --fast 10 --slow 30
+
+    python -m sol_backtest.main --start 2025-01-01 --end 2026-01-01 \
+        --resolution 15m --strategy pivot_r1_rejection
 """
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 
 from sol_backtest.backtest.engine import Backtester
 from sol_backtest.backtest.metrics import compute_metrics
+from sol_backtest.backtest.pattern_engine import PatternBacktester, PatternTrade
 from sol_backtest.config import RESOLUTION_SECONDS, base_url_for, settings
 from sol_backtest.data.fetcher import fetch_candles
 from sol_backtest.fees import FeeModel
+from sol_backtest.strategies.pivot_r1_rejection import PivotR1RejectionStrategy
 from sol_backtest.strategies.sma_crossover import SmaCrossoverStrategy
 
+# kind: "signal" strategies implement generate_signals + run through Backtester.
+#       "pattern" strategies implement generate_setups (entry/stop/target) and
+#       run through PatternBacktester, and additionally need daily OHLC to
+#       compute pivot levels.
 STRATEGIES = {
-    "sma_crossover": lambda args: SmaCrossoverStrategy(fast=args.fast, slow=args.slow),
+    "sma_crossover": {
+        "kind": "signal",
+        "factory": lambda args, daily_df: SmaCrossoverStrategy(fast=args.fast, slow=args.slow),
+    },
+    "pivot_r1_rejection": {
+        "kind": "pattern",
+        "factory": lambda args, daily_df: PivotR1RejectionStrategy(daily_df),
+    },
 }
+
+DAILY_PIVOT_LOOKBACK_DAYS = 2  # extra days of daily data fetched before `start` so the first bar has a prior-day pivot
 
 
 def _to_unix(date_str: str) -> int:
@@ -46,34 +65,48 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     start, end = _to_unix(args.start), _to_unix(args.end)
+    strategy_info = STRATEGIES[args.strategy]
+    base_url = base_url_for(args.env)
 
     print(f"Fetching {args.symbol} [{args.resolution}] candles from {args.start} to {args.end} ({args.env})...")
     df = fetch_candles(
-        base_url=base_url_for(args.env),
-        symbol=args.symbol,
-        resolution=args.resolution,
-        start=start,
-        end=end,
-        use_cache=not args.no_cache,
+        base_url=base_url, symbol=args.symbol, resolution=args.resolution,
+        start=start, end=end, use_cache=not args.no_cache,
     )
     print(f"Loaded {len(df)} candles.")
 
-    strategy = STRATEGIES[args.strategy](args)
-    signals = strategy.generate_signals(df)
+    daily_df = None
+    if strategy_info["kind"] == "pattern":
+        daily_start = start - DAILY_PIVOT_LOOKBACK_DAYS * 86400
+        print(f"Fetching {args.symbol} [1d] candles for pivot calculation ({DAILY_PIVOT_LOOKBACK_DAYS} day lookback)...")
+        daily_df = fetch_candles(
+            base_url=base_url, symbol=args.symbol, resolution="1d",
+            start=daily_start, end=end, use_cache=not args.no_cache,
+        )
+
+    strategy = strategy_info["factory"](args, daily_df)
 
     fee_model = FeeModel(
         maker_fee_pct=settings.maker_fee_pct,
         taker_fee_pct=settings.taker_fee_pct,
         gst_pct=settings.gst_pct,
     )
-    backtester = Backtester(
-        fee_model=fee_model,
-        initial_capital=args.capital,
-        leverage=args.leverage,
-        allocation_pct=args.allocation_pct,
-        assume_maker_fees=args.maker,
-    )
-    result = backtester.run(df, signals)
+
+    if strategy_info["kind"] == "signal":
+        signals = strategy.generate_signals(df)
+        backtester = Backtester(
+            fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
+            allocation_pct=args.allocation_pct, assume_maker_fees=args.maker,
+        )
+        result = backtester.run(df, signals)
+    else:
+        setups = strategy.generate_setups(df)
+        print(f"Pattern triggered on {int(setups['entry_signal'].sum())} bars.")
+        backtester = PatternBacktester(
+            fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
+            allocation_pct=args.allocation_pct, assume_maker_fees=args.maker,
+        )
+        result = backtester.run(df, setups)
 
     periods_per_year = (365 * 86400) / RESOLUTION_SECONDS[args.resolution]
     metrics = compute_metrics(result.equity_curve, result.trades, args.capital, periods_per_year)
@@ -94,6 +127,10 @@ def main() -> None:
     print(f"Number of trades:     {metrics['num_trades']}")
     print(f"Win rate:             {metrics['win_rate_pct']:.2f}%")
     print(f"Profit factor:        {metrics['profit_factor']:.2f}")
+    if result.trades and isinstance(result.trades[0], PatternTrade):
+        reasons = Counter(t.exit_reason for t in result.trades)
+        print(f"Exit breakdown:       stop={reasons.get('stop', 0)}  "
+              f"target={reasons.get('target', 0)}  eod_forced={reasons.get('eod_forced', 0)}")
     print("-" * 60)
     print(f"Gross P&L (no fees):  {metrics['gross_pnl']:,.2f}")
     print(f"Total fees paid:      {metrics['total_fees_paid']:,.2f}")

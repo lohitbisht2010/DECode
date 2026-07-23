@@ -9,14 +9,19 @@ including Delta's actual trading fees (maker/taker + GST).
 ```
 config.py                Settings: symbol, resolution, fee schedule, backtest defaults
 fees.py                  FeeModel: maker/taker % of notional + 18% GST, per Delta's fee schedule
+pivots.py                Daily pivot points (PP/R1/R2/R3/S1/S2/S3) attached to intraday bars
 data/fetcher.py          Paginated /v2/history/candles fetcher with local CSV caching
-backtest/engine.py       Signal-driven long/short backtester, applies fees on every fill
+backtest/engine.py       Signal-driven long/short backtester ("hold until next signal")
+backtest/pattern_engine.py  Pattern-trade backtester (entry + stop-loss + target, checked
+                          bar-by-bar) for strategies whose exit isn't just "next signal"
 backtest/metrics.py      Total return, CAGR, Sharpe, max drawdown, win rate, profit factor,
                           gross vs net P&L, fees as % of gross P&L
-strategies/base.py        Strategy interface: generate_signals(df) -> Series of {1, 0, -1}
-strategies/sma_crossover.py  Placeholder demo strategy (swap this out for the real pattern)
-main.py                   CLI: fetch -> backtest -> report
-tests/                     Unit tests for fees, engine fee accounting, and fetcher pagination/caching
+strategies/base.py            Strategy interface: generate_signals(df) -> Series of {1, 0, -1}
+strategies/pattern_base.py     PatternStrategy interface: generate_setups(df) -> entry/stop/target
+strategies/sma_crossover.py    Placeholder demo strategy for the signal-based engine
+strategies/pivot_r1_rejection.py  R1 rejection outside-bar pattern (see below)
+main.py                   CLI: fetch -> backtest -> report (picks engine by strategy kind)
+tests/                     Unit tests for fees, both engines, pivots, and pattern detection
 ```
 
 ## Fee model
@@ -42,20 +47,56 @@ Every trade pays a fee on both legs (entry and exit), computed on that
 leg's notional value at the fill price — the same way Delta actually
 charges it — not a flat round-trip estimate.
 
-## Plugging in your pattern
+## Strategy: R1 rejection outside-bar (`pivot_r1_rejection`)
 
-`strategies/sma_crossover.py` is a placeholder just to exercise the
-pipeline end to end. To backtest your actual pattern:
+On the 15m timeframe, comparing each bar to the one immediately before it:
 
-1. Add a new file in `strategies/`, e.g. `strategies/my_pattern.py`,
-   implementing `Strategy.generate_signals(df) -> pd.Series` (1 = long,
-   -1 = short, 0 = flat, one value per bar).
-2. Register it in `main.py`'s `STRATEGIES` dict.
-3. Run it via `--strategy my_pattern`.
+1. `current.high  >  previous.high` — takes out the prior bar's high
+2. `current.close <= previous.open` — closes back below the prior bar's open
+3. `previous.open  <  previous.close` — prior bar was bullish
+4. `current.open   >  current.close` — current bar is bearish
+5. `current.high   >= R1` — pokes at/through the pivot resistance
+6. `current.close  <  R1` — but closes back below it (a rejection)
 
-The engine executes on the *next* bar's open after a signal changes, so
-write `generate_signals` using only data available up to and including the
-current bar — no lookahead.
+R1 and PP come from the **previous UTC day's** daily pivot (classic
+floor-trader formula: `PP=(H+L+C)/3`, `R1=2*PP-L`, etc. — see `pivots.py`).
+Trade plan: **short at the next bar's open**, **stop at the signal bar's
+own high** (pattern invalidated if price keeps going), **target at the
+daily pivot line (PP)** — fading the rejection back toward the pivot.
+This runs through `PatternBacktester`, which checks the stop and target
+against every subsequent bar's high/low (not just the close) until one is
+hit; if both would be hit in the same bar, the stop is assumed to win
+(the conservative assumption, since intrabar order isn't knowable from
+OHLC data alone).
+
+Two things worth confirming against your own read of the pattern:
+- *"prev open<close"* was read as "the previous bar's open is below its
+  close" (i.e. previous bar bullish) — the alternative parse ("previous
+  open below the *current* close") didn't fit the rest of the pattern.
+- *"target at the pivot line"* was read as the central pivot point (PP),
+  not S1 — PP is the level commonly called "the pivot" in floor-trader
+  terminology.
+
+If either of those isn't what you meant, they're both isolated one-line
+changes in `strategies/pivot_r1_rejection.py`.
+
+## Plugging in a different pattern
+
+Two extension points depending on how your strategy exits a position:
+
+- **Hold until the next signal** (like a moving-average crossover): add a
+  file to `strategies/` implementing `Strategy.generate_signals(df) ->
+  pd.Series` (1 = long, -1 = short, 0 = flat, one value per bar), and run
+  it through `backtest.engine.Backtester`.
+- **Discrete entry + stop-loss + target** (like the R1 rejection pattern
+  above): implement `PatternStrategy.generate_setups(df) -> pd.DataFrame`
+  with `entry_signal`/`direction`/`stop_price`/`target_price` columns, and
+  run it through `backtest.pattern_engine.PatternBacktester`.
+
+Either way, register the strategy in `main.py`'s `STRATEGIES` dict (with
+`"kind": "signal"` or `"kind": "pattern"`) and run it via `--strategy
+<name>`. Both engines execute on the bar *after* a signal, using only data
+available up to and including the signal bar — no lookahead.
 
 ## Setup
 
@@ -70,6 +111,12 @@ python -m sol_backtest.main \
   --start 2025-01-01 --end 2026-01-01 \
   --resolution 1h \
   --strategy sma_crossover --fast 10 --slow 30 \
+  --capital 10000 --leverage 1 --allocation-pct 100
+
+# R1 rejection pattern (needs 15m bars; daily data for pivots is fetched automatically)
+python -m sol_backtest.main \
+  --start 2025-01-01 --end 2026-01-01 \
+  --resolution 15m --strategy pivot_r1_rejection \
   --capital 10000 --leverage 1 --allocation-pct 100
 ```
 
@@ -86,11 +133,13 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-11 tests covering: fee calculation (GST, maker vs taker, absolute
-notional), backtest engine fee accounting (hand-verified against manually
-computed equity, including a regression test for a double-fee-counting
-bug caught during development), and fetcher pagination/caching — all
-against synthetic data, no live API access required.
+24 tests covering: fee calculation (GST, maker vs taker, absolute
+notional), both backtest engines' fee accounting (hand-verified against
+manually computed equity, including regression tests for a
+double-fee-counting bug caught during development), fetcher
+pagination/caching, pivot point formulas, and the R1 rejection pattern's
+condition-by-condition detection — all against synthetic data, no live
+API access required.
 
 ## Known limitations
 
