@@ -120,13 +120,14 @@ def main() -> None:
     print(f"INDEPENDENT COMPARISON  |  {args.symbol} {args.resolution}  |  {args.start} -> {args.end}  "
           f"|  each run alone at {args.capital:,.0f} capital")
     print("=" * 100)
-    header = f"{'strategy':<26}{'trades':>8}{'win%':>8}{'p.factor':>10}{'return%':>10}{'sharpe':>9}{'maxdd%':>9}{'fees':>12}{'net_pnl':>12}"
+    header = (f"{'strategy':<26}{'trades':>8}{'win%':>8}{'p.factor':>10}{'return%':>10}{'sharpe':>9}{'maxdd%':>9}"
+               f"{'gross_pnl':>12}{'fees':>12}{'net_pnl':>12}")
     print(header)
     print("-" * len(header))
     for name, m in metrics_by_strategy.items():
         print(f"{name:<26}{m['num_trades']:>8}{m['win_rate_pct']:>8.1f}{m['profit_factor']:>10.2f}"
               f"{m['total_return_pct']:>10.2f}{m['sharpe_ratio']:>9.2f}{m['max_drawdown_pct']:>9.2f}"
-              f"{m['total_fees_paid']:>12,.0f}{m['net_pnl']:>12,.0f}")
+              f"{m['gross_pnl']:>12,.0f}{m['total_fees_paid']:>12,.0f}{m['net_pnl']:>12,.0f}")
 
     print("\nPairwise correlation of daily returns (1.0 = moves identically, 0 = unrelated, -1.0 = moves oppositely):")
     corr = compute_return_correlation({name: r.equity_curve for name, r in results.items()})
@@ -146,6 +147,7 @@ def main() -> None:
     print(f"Sharpe ratio:         {combined_metrics['sharpe_ratio']:.2f}")
     print(f"Max drawdown:         {combined_metrics['max_drawdown_pct']:.2f}%")
     print(f"Total trades:         {combined_metrics['num_trades']} (weighted-scaled across strategies)")
+    print(f"Gross P&L (no fees):  {combined_metrics['gross_pnl']:,.2f}")
     print(f"Total fees paid:      {combined_metrics['total_fees_paid']:,.2f}")
     print(f"Net P&L:              {combined_metrics['net_pnl']:,.2f}")
     print("=" * 100)
