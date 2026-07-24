@@ -264,3 +264,70 @@ def test_open_trade_force_closed_at_end_of_data():
     trade = result.trades[0]
     assert trade.exit_reason == "eod_forced"
     assert trade.exit_price == 97.0  # last close
+
+
+def test_exit_signal_closes_at_next_bar_open():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800, 2700],
+        "open": [100.0, 100.0, 95.0, 90.0],
+        "high": [100.0, 101.0, 96.0, 91.0],
+        "low": [100.0, 99.0, 94.0, 89.0],
+        "close": [100.0, 100.0, 95.0, 90.0],
+        "volume": [1, 1, 1, 1],
+    })
+    setups = pd.DataFrame({
+        "entry_signal": [True, False, False, False],
+        "direction": [-1] * 4,
+        "stop_price": [999.0] * 4,       # never hit
+        "target_price": [float("nan")] * 4,  # no fixed target
+        "exit_signal": [False, False, True, False],
+    })
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1, allocation_pct=100)
+    result = bt.run(df, setups)
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "signal_exit"
+    assert trade.exit_price == 90.0  # filled at the bar *after* exit_signal fired
+    assert abs(trade.gross_pnl - 1000.0) < 1e-9  # short 100 units 100->90
+    assert abs(result.final_equity - 11000.0) < 1e-9
+
+
+def test_stop_takes_priority_over_exit_signal_same_bar():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 107.0],
+        "high": [100.0, 101.0, 108.0],
+        "low": [100.0, 99.0, 104.0],
+        "close": [100.0, 100.0, 105.0],
+        "volume": [1, 1, 1],
+    })
+    setups = pd.DataFrame({
+        "entry_signal": [True, False, False],
+        "direction": [-1] * 3,
+        "stop_price": [105.0] * 3,
+        "target_price": [float("nan")] * 3,
+        "exit_signal": [False, False, True],  # fires the same bar the stop is hit
+    })
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1, allocation_pct=100)
+    result = bt.run(df, setups)
+    assert result.trades[0].exit_reason == "stop"
+
+
+def test_nan_target_never_triggers_a_target_exit():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800, 2700, 3600],
+        "open": [100.0, 100.0, 80.0, 60.0, 50.0],
+        "high": [100.0, 101.0, 81.0, 61.0, 51.0],
+        "low": [100.0, 99.0, 59.0, 49.0, 49.0],
+        "close": [100.0, 100.0, 60.0, 50.0, 50.0],
+        "volume": [1, 1, 1, 1, 1],
+    })
+    setups = _setups(5, signal_index=0, stop=999.0, target=float("nan"))
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1, allocation_pct=100)
+    result = bt.run(df, setups)
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_reason == "eod_forced"  # never a "target" exit despite the huge favorable move
+    assert trade.exit_price == 50.0

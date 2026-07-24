@@ -1,19 +1,25 @@
-"""Backtester for discrete pattern trades (entry + stop-loss + target),
-as opposed to engine.Backtester's continuous hold-a-position-per-signal
-model.
+"""Backtester for discrete pattern trades (entry + stop-loss + optional
+target/exit-signal), as opposed to engine.Backtester's continuous
+hold-a-position-per-signal model.
 
 Execution model:
   - A signal on bar i (known from data up to and including bar i) is
     filled at bar i+1's open - no lookahead.
   - Once in a trade, every subsequent bar's high/low is checked against
-    the stop and target. If both would be hit within the same bar, the
-    stop is assumed to trigger first (the conservative assumption, since
-    intrabar order isn't known from OHLC alone).
+    the stop and (if set) the target. If both would be hit within the
+    same bar, the stop is assumed to trigger first (the conservative
+    assumption, since intrabar order isn't known from OHLC alone).
+  - Strategies with no fixed target (e.g. "hold until the trend flips")
+    leave target_price as NaN - only the stop is checked against price,
+    and setups may supply an `exit_signal` column instead: True on a bar
+    schedules a close at the *next* bar's open (same no-lookahead
+    convention as entries), unless the stop fires first.
   - Only one position at a time; new signals while already in a trade are
     ignored (matches the single-position constraint of engine.Backtester).
   - A position still open at the end of the data is force-closed at the
     final bar's close.
 """
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -26,8 +32,9 @@ from sol_backtest.fees import FeeModel
 @dataclass
 class PatternTrade(Trade):
     stop_price: float = 0.0
-    target_price: float = 0.0
+    target_price: float = float("nan")
     exit_reason: str = ""
+    tag: str = ""
 
 
 class PatternBacktester:
@@ -56,7 +63,7 @@ class PatternBacktester:
         whatever hitting the stop would have lost. Combine with
         risk_pct_per_trade=1 and reward_multiple=4 for "risk 1%, target 4%"
         sizing. When None (default), the setup's own target_price is used
-        (e.g. a pivot level).
+        as-is (which may itself be NaN for a no-fixed-target strategy).
         """
         self.fee_model = fee_model
         self.initial_capital = initial_capital
@@ -67,7 +74,7 @@ class PatternBacktester:
         self.reward_multiple = reward_multiple
 
     def _open(self, equity: float, price: float, direction: int, time: int,
-              stop_price: float, target_price: float) -> Optional[PatternTrade]:
+              stop_price: float, target_price: float, tag: str = "") -> Optional[PatternTrade]:
         risk_per_unit = abs(price - stop_price)
 
         if self.risk_pct_per_trade is not None:
@@ -92,7 +99,7 @@ class PatternBacktester:
         fee = self.fee_model.fee_for_trade(notional, self.is_maker)
         return PatternTrade(
             direction=direction, entry_time=time, entry_price=price, qty=qty,
-            entry_fee=fee, stop_price=stop_price, target_price=target_price,
+            entry_fee=fee, stop_price=stop_price, target_price=target_price, tag=tag,
         )
 
     def _close(self, trade: PatternTrade, price: float, time: int, reason: str) -> float:
@@ -110,7 +117,8 @@ class PatternBacktester:
 
         equity = self.initial_capital
         open_trade: Optional[PatternTrade] = None
-        pending_entry = None  # (direction, stop_price, target_price)
+        pending_entry = None  # (direction, stop_price, target_price, tag)
+        pending_exit = False
         trades: List[PatternTrade] = []
         equity_curve = []
 
@@ -124,34 +132,49 @@ class PatternBacktester:
         direction_arr = setups["direction"].to_numpy()
         stop_arr = setups["stop_price"].to_numpy()
         target_arr = setups["target_price"].to_numpy()
+        has_exit_signal = "exit_signal" in setups.columns
+        exit_signal_arr = setups["exit_signal"].to_numpy() if has_exit_signal else None
+        has_tag = "tag" in setups.columns
+        tag_arr = setups["tag"].to_numpy() if has_tag else None
 
         for i in range(len(df)):
+            # A trend-flip-style exit decided from bar i-1's close fills at this bar's open.
+            if pending_exit and open_trade is not None:
+                equity += self._close(open_trade, opens[i], times[i], "signal_exit")
+                trades.append(open_trade)
+                open_trade = None
+                pending_exit = False
+
             if pending_entry is not None and open_trade is None:
-                direction, stop_price, target_price = pending_entry
-                target_required = self.reward_multiple is None
-                if not pd.isna(stop_price) and (not target_required or not pd.isna(target_price)):
-                    open_trade = self._open(equity, opens[i], direction, times[i], stop_price, target_price)
+                direction, stop_price, target_price, tag = pending_entry
+                if not pd.isna(stop_price):
+                    open_trade = self._open(equity, opens[i], direction, times[i], stop_price, target_price, tag)
                     if open_trade is not None:
                         equity -= open_trade.entry_fee
                 pending_entry = None
 
             if open_trade is not None:
+                target_price = open_trade.target_price
+                has_target = not math.isnan(target_price)
                 if open_trade.direction == -1:
                     hit_stop = highs[i] >= open_trade.stop_price
-                    hit_target = lows[i] <= open_trade.target_price
+                    hit_target = has_target and lows[i] <= target_price
                 else:
                     hit_stop = lows[i] <= open_trade.stop_price
-                    hit_target = highs[i] >= open_trade.target_price
+                    hit_target = has_target and highs[i] >= target_price
 
                 if hit_stop or hit_target:
                     reason = "stop" if hit_stop else "target"
-                    exit_price = open_trade.stop_price if hit_stop else open_trade.target_price
+                    exit_price = open_trade.stop_price if hit_stop else target_price
                     equity += self._close(open_trade, exit_price, times[i], reason)
                     trades.append(open_trade)
                     open_trade = None
+                elif has_exit_signal and bool(exit_signal_arr[i]):
+                    pending_exit = True
 
             if open_trade is None and pending_entry is None and bool(entry_signal[i]):
-                pending_entry = (int(direction_arr[i]), float(stop_arr[i]), float(target_arr[i]))
+                tag = str(tag_arr[i]) if has_tag else ""
+                pending_entry = (int(direction_arr[i]), float(stop_arr[i]), float(target_arr[i]), tag)
 
             unrealized = 0.0
             if open_trade is not None:

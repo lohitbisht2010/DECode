@@ -10,19 +10,27 @@ including Delta's actual trading fees (maker/taker + GST).
 config.py                Settings: symbol, resolution, fee schedule, backtest defaults
 fees.py                  FeeModel: maker/taker % of notional + 18% GST, per Delta's fee schedule
 pivots.py                Daily pivot points (PP/R1/R2/R3/S1/S2/S3) attached to intraday bars
+indicators.py            Supertrend (ATR-based, sticky bands), computed on the trading timeframe
 data/fetcher.py          Paginated /v2/history/candles fetcher with local CSV caching
 backtest/engine.py       Signal-driven long/short backtester ("hold until next signal")
-backtest/pattern_engine.py  Pattern-trade backtester (entry + stop-loss + target, checked
-                          bar-by-bar) for strategies whose exit isn't just "next signal"
+backtest/pattern_engine.py  Pattern-trade backtester (entry + stop-loss + target/exit-signal,
+                          checked bar-by-bar) for strategies whose exit isn't just "next signal"
 backtest/metrics.py      Total return, CAGR, Sharpe, max drawdown, win rate, profit factor,
                           gross vs net P&L, fees as % of gross P&L
 strategies/base.py            Strategy interface: generate_signals(df) -> Series of {1, 0, -1}
 strategies/pattern_base.py     PatternStrategy interface: generate_setups(df) -> entry/stop/target
 strategies/sma_crossover.py    Placeholder demo strategy for the signal-based engine
-strategies/pivot_r1_rejection.py  R1 rejection outside-bar pattern (see below)
-strategies/pivot_r1_breakout.py   R1 breakout continuation pattern (see below)
-main.py                   CLI: fetch -> backtest -> report (picks engine by strategy kind)
-tests/                     Unit tests for fees, both engines, pivots, and pattern detection
+strategies/pivot_r1_rejection.py     R1 rejection outside-bar pattern (see below)
+strategies/pivot_r1_breakout.py      R1 breakout continuation pattern (see below)
+strategies/pivot_ladder_rejection.py  Same rejection pattern at every pivot rung (see below)
+strategies/supertrend_rejection.py    Rejection at the Supertrend line, trend-flip exit (see below)
+portfolio.py              Combine multiple strategies' results: return correlation, weighted
+                          portfolio equity curve, scaled/merged trade list
+main.py                   CLI: fetch -> backtest -> report for a single strategy
+compare.py                 CLI: run several strategies over the same window, compare them,
+                          and report a combined-capital portfolio (see below)
+tests/                     Unit tests for fees, both engines, indicators, pivots, pattern
+                          detection, and portfolio combination
 ```
 
 ## Fee model
@@ -105,6 +113,62 @@ move and can target the next resistance level out or run a wider
 `--reward-multiple` (fewer, larger wins) — see the "which strategy suits
 this fee schedule" discussion this was built to test.
 
+## Strategy: pivot ladder rejection (`pivot_ladder_rejection`)
+
+The same rejection pattern as `pivot_r1_rejection`, but checked at every
+rung of the pivot ladder instead of only R1, each targeting the level one
+rung below it:
+
+```
+R3 -> R2,  R2 -> R1,  R1 -> PP,  PP -> S1,  S1 -> S2,  S2 -> S3
+```
+
+The trigger conditions at each rung are identical to the R1 pattern
+(substitute "R1" for whichever level is being tested). If a bar's high
+happens to clear more than one level at once, the *highest* one rejected
+wins (more extreme = more informative) — stop is always the signal bar's
+own high, same as every other rejection variant. There's no rung for a
+rejection *at* S3 (nothing below it to target).
+
+Each trade's CSV row and the CLI's `Trigger levels:` summary line record
+which rung (`tag` column: `r3`, `r2`, `r1`, `pp`, `s1`, or `s2`) fired it,
+so you can see whether particular levels perform differently from others.
+
+## Strategy: Supertrend rejection continuation (`supertrend_rejection`)
+
+The same rejection pattern again, this time triggered against the
+[Supertrend](https://en.wikipedia.org/wiki/SuperTrend) line (`indicators.py`,
+ATR-based with sticky recursive bands, default period 10 / multiplier 3 —
+tune with `--atr-period` / `--supertrend-multiplier`) instead of a daily
+pivot: price is in a downtrend (Supertrend red, sitting above price as
+resistance), rallies up into the line, and gets rejected — trading with
+the trend's continuation rather than against it.
+
+1. `trend == -1` (Supertrend currently red/bearish)
+2. `current.high  >  previous.high`
+3. `current.close <= previous.open`
+4. `previous.open  <  previous.close`
+5. `current.open   >  current.close`
+6. `current.high   >= supertrend`
+7. `current.close  <  supertrend`
+
+Unlike every other strategy here, there's **no fixed take-profit target**:
+short at the next bar's open, stop at the signal bar's own high, and hold
+until the Supertrend itself flips bullish (price closes above it) — exit
+at the *next* bar's open once that flip is confirmed, same no-lookahead
+convention as entries. This is the first strategy to exercise
+`PatternBacktester`'s NaN-target + `exit_signal` machinery instead of a
+fixed target level; `main.py`'s exit breakdown reports `signal_exit`
+counts alongside `stop`/`target`/`eod_forced` for it.
+
+In the real backtest run against 2025-01-01 through 2026-07-01, 21 of 28
+trades were stopped out (75%) versus only 7 signal exits — worth noting
+since it points at a structural tension in this exact rule set: a stop
+pinned to the signal candle's own high is tight by mean-reversion
+standards, but this is nominally a trend-*continuation* trade, so it gets
+stopped out before the trend has room to reassert itself more often than
+it survives to actually ride the continuation.
+
 ## Plugging in a different pattern
 
 Two extension points depending on how your strategy exits a position:
@@ -123,6 +187,67 @@ Either way, register the strategy in `main.py`'s `STRATEGIES` dict (with
 <name>`. Both engines execute on the bar *after* a signal, using only data
 available up to and including the signal bar — no lookahead.
 
+## Comparing strategies and combining them into a portfolio (`compare.py`)
+
+```bash
+python -m sol_backtest.compare \
+  --start 2025-01-01 --end 2026-07-01 --resolution 15m \
+  --leverage 5 --risk-pct-per-trade 1
+```
+
+Runs every pattern strategy (or a `--strategies a,b,c` subset) over the
+*same* price data and reports three things:
+
+1. **Independent comparison** — each strategy's own metrics, as if it
+   alone had the full capital.
+2. **Pairwise return correlation** — daily-return correlation between
+   each pair, to see whether they move together or diversify each other.
+3. **Combined portfolio** — an equal-weighted (or `--weights
+   0.4,0.3,0.2,0.1`-style custom-weighted) blend, using the *same*
+   capital split across all of them rather than each getting the full
+   amount.
+
+The combined curve is computed by scaling and summing each strategy's
+full-capital equity curve rather than re-running every backtest at a
+fraction of the capital (`portfolio.py`) — valid because every sizing
+mode here (`--allocation-pct` or `--risk-pct-per-trade`) is a percentage
+of *current* equity, so every dollar figure in a trade scales linearly
+with starting capital. Running strategy *i* alone at `weight_i * capital`
+produces exactly `weight_i * equity_curve_i(t)` at every bar; summing the
+scaled full-capital curves gives the identical result a real capital-split
+portfolio would produce.
+
+**Real result** (2025-01-01 → 2026-07-01, 15m, 1% risk/trade, 5x leverage cap):
+
+| strategy | trades | win% | profit factor | return% | fees paid | net P&L |
+|---|---|---|---|---|---|---|
+| pivot_r1_rejection | 71 | 28.2 | 0.68 | -19.4% | 15,085 | -19,417 |
+| pivot_r1_breakout | 359 | 28.1 | 0.67 | -65.8% | 48,195 | -65,783 |
+| pivot_ladder_rejection | 346 | 27.2 | 0.75 | -53.1% | 54,880 | -53,048 |
+| supertrend_rejection | 28 | 7.1 | 0.12 | -23.5% | 6,142 | -23,488 |
+
+Pairwise correlation of daily returns, same window:
+
+| | rejection | breakout | ladder | supertrend |
+|---|---|---|---|---|
+| **rejection** | 1.00 | 0.07 | 0.33 | 0.06 |
+| **breakout** | 0.07 | 1.00 | 0.03 | 0.08 |
+| **ladder** | 0.33 | 0.03 | 1.00 | 0.07 |
+| **supertrend** | 0.06 | 0.08 | 0.07 | 1.00 |
+
+All four are genuinely low-correlated (0.03-0.33) — they lose money via
+different mechanisms and timing, not the same one four times over. That's
+the technical definition of a diversification benefit, and it's real
+here. But **diversification reduces variance, not a negative mean
+return** - all four lost money individually over this window, so the
+equal-weighted combined portfolio comes out close to the simple average
+of their returns (-40.4%, essentially `(-19.4 -65.8 -53.1 -23.5)/4`) — a
+smoother decline, not a profitable one. Low correlation between
+strategies is a real, useful property to know about *once you have
+strategies with positive expectancy* to combine; it doesn't rescue a set
+that doesn't have one yet. None of these four would be worth running live
+as specified, individually or combined, over this period.
+
 ## Verifying individual trades
 
 Every run writes a per-trade CSV to `sol_backtest/results/` (pass
@@ -139,7 +264,8 @@ closed trade:
 | `qty` | position size in the underlying |
 | `entry_fee` / `exit_fee` | fee charged on each leg (incl. GST) |
 | `gross_pnl` / `net_pnl` | before/after fees |
-| `stop_price` / `target_price` / `exit_reason` | pattern strategies only — `exit_reason` is `stop`, `target`, or `eod_forced` |
+| `stop_price` / `target_price` / `exit_reason` | pattern strategies only — `exit_reason` is `stop`, `target`, `signal_exit`, or `eod_forced` |
+| `tag` | pattern strategies that set one (e.g. `pivot_ladder_rejection` records which rung — `r3`/`r2`/`r1`/`pp`/`s1`/`s2` — triggered the trade) |
 
 Cross-check a row against the source data with, e.g.:
 
@@ -249,17 +375,22 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-42 tests covering: fee calculation (GST, maker vs taker, absolute
+67 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
 double-fee-counting bug caught during development), risk-based position
 sizing (hand-verified stop-out losses exactly N% of equity, leverage
 capping, zero-stop-distance handling), the fixed risk:reward target
 (hand-verified against long/short entry prices, and a combined 1%-risk/
-4%-target scenario), fetcher pagination/caching, pivot point formulas,
-both the R1 rejection and R1 breakout patterns' condition-by-condition
-detection, and the trade CSV export — all against synthetic data, no live
-API access required.
+4%-target scenario), the NaN-target/`exit_signal` machinery (trend-flip
+exits, stop-vs-signal priority), the Supertrend indicator (hand-traced
+through its recursive sticky-band logic), fetcher pagination/caching,
+pivot point formulas, all four patterns' condition-by-condition detection
+(including the ladder's highest-level-wins priority rule), portfolio
+combination math (trade scaling, weighted equity curves, return
+correlation), and the trade CSV export — all against synthetic data, no
+live API access required except for the one real-data validation run
+whose results are quoted above.
 
 ## Known limitations
 

@@ -29,6 +29,8 @@ def trades_to_dataframe(trades: List[Trade]) -> pd.DataFrame:
             row["stop_price"] = t.stop_price
             row["target_price"] = t.target_price
             row["exit_reason"] = t.exit_reason
+            if t.tag:
+                row["tag"] = t.tag
         rows.append(row)
     return pd.DataFrame(rows)
 
