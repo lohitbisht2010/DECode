@@ -453,3 +453,67 @@ def test_winning_trade_resets_the_streak():
     result = bt.run(df, setups)
 
     assert len(result.trades) == 6  # all 5 cycles plus the 6th signal, never blocked
+
+
+def _asymmetric_fee():
+    return FeeModel(maker_fee_pct=0.5, taker_fee_pct=2.0, gst_pct=0.0)
+
+
+def test_maker_on_target_only_charges_taker_on_entry_and_stop_exit():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 103.0],
+        "high": [100.0, 101.0, 106.0],
+        "low": [100.0, 99.0, 102.0],
+        "close": [100.0, 100.0, 105.0],
+        "volume": [1, 1, 1],
+    })
+    setups = _setups(3, signal_index=0, stop=105.0, target=90.0)
+    bt = PatternBacktester(fee_model=_asymmetric_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, maker_on_target_only=True)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    assert trade.exit_reason == "stop"
+    assert abs(trade.entry_fee - 200.0) < 1e-9   # taker 2% of 10000 notional
+    assert abs(trade.exit_fee - 210.0) < 1e-9     # taker 2% of 10500 notional (stop, not target)
+
+
+def test_maker_on_target_only_charges_maker_only_on_target_exit():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800, 2700],
+        "open": [100.0, 100.0, 95.0, 92.0],
+        "high": [100.0, 101.0, 96.0, 93.0],
+        "low": [100.0, 99.0, 93.0, 91.0],
+        "close": [100.0, 100.0, 94.0, 92.0],
+        "volume": [1, 1, 1, 1],
+    })
+    setups = _setups(4, signal_index=0, stop=102.0, target=93.0)
+    bt = PatternBacktester(fee_model=_asymmetric_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, maker_on_target_only=True)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    assert trade.exit_reason == "target"
+    assert abs(trade.entry_fee - 200.0) < 1e-9   # entry is always taker, even in this mode
+    assert abs(trade.exit_fee - 46.5) < 1e-9       # maker 0.5% of 93*100=9300 notional
+
+
+def test_maker_on_target_only_overrides_assume_maker_fees():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800],
+        "open": [100.0, 100.0, 103.0],
+        "high": [100.0, 101.0, 106.0],
+        "low": [100.0, 99.0, 102.0],
+        "close": [100.0, 100.0, 105.0],
+        "volume": [1, 1, 1],
+    })
+    setups = _setups(3, signal_index=0, stop=105.0, target=90.0)
+    bt = PatternBacktester(fee_model=_asymmetric_fee(), initial_capital=10000, leverage=1, allocation_pct=100,
+                            assume_maker_fees=True, maker_on_target_only=True)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    # even with assume_maker_fees=True, maker_on_target_only wins: this is a stop exit -> taker
+    assert abs(trade.entry_fee - 200.0) < 1e-9
+    assert abs(trade.exit_fee - 210.0) < 1e-9

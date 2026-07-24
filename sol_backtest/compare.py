@@ -49,7 +49,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reward-multiple", type=float, default=None)
     p.add_argument("--max-consecutive-losses-per-day", type=int, default=None,
                     help="Applied identically to every strategy being compared - see main.py's help for details.")
-    p.add_argument("--maker", action="store_true")
+    p.add_argument("--maker", action="store_true",
+                    help="Optimistic: assume maker fees on every fill. See main.py's help for the caveat.")
+    p.add_argument("--maker-on-target-only", action="store_true",
+                    help="Realistic: maker fee only on target hits, taker on entries/stops/other exits. "
+                         "Overrides --maker when both are set.")
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--no-csv", action="store_true", help="Skip writing per-trade CSVs for each strategy")
     return p.parse_args()
@@ -110,6 +114,7 @@ def main() -> None:
             allocation_pct=args.allocation_pct, assume_maker_fees=args.maker,
             risk_pct_per_trade=args.risk_pct_per_trade, reward_multiple=args.reward_multiple,
             max_consecutive_losses_per_day=args.max_consecutive_losses_per_day,
+            maker_on_target_only=args.maker_on_target_only,
         )
         results[name] = backtester.run(df, setups)
         print(f"  {name}: {int(setups['entry_signal'].sum())} signals, {len(results[name].trades)} trades")

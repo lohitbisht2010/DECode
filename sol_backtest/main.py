@@ -136,7 +136,14 @@ def parse_args() -> argparse.Namespace:
                     help="Pattern strategies only: after this many losing trades in a row within the same UTC "
                          "calendar day, stop taking new entries for the rest of that day. Resets at the next "
                          "day boundary; a winning trade resets the streak immediately.")
-    p.add_argument("--maker", action="store_true", help="Assume maker fees instead of taker")
+    p.add_argument("--maker", action="store_true",
+                    help="Assume maker fees on every fill (entry, stop, target) - an optimistic upper bound, "
+                         "since entries and stop-outs are realistically immediate/taker fills.")
+    p.add_argument("--maker-on-target-only", action="store_true",
+                    help="Pattern strategies only: a more realistic maker assumption than --maker - only a "
+                         "target hit (a resting limit order someone else's market order fills) gets the maker "
+                         "rate; entries and stop/eod_forced/signal_exit closes stay taker. Overrides --maker "
+                         "when both are set.")
     p.add_argument("--no-cache", action="store_true", help="Bypass the local candle cache")
     p.add_argument("--no-csv", action="store_true", help="Skip writing the per-trade CSV to sol_backtest/results/")
     return p.parse_args()
@@ -195,20 +202,27 @@ def main() -> None:
             allocation_pct=args.allocation_pct, assume_maker_fees=args.maker,
             risk_pct_per_trade=args.risk_pct_per_trade, reward_multiple=args.reward_multiple,
             max_consecutive_losses_per_day=args.max_consecutive_losses_per_day,
+            maker_on_target_only=args.maker_on_target_only,
         )
         result = backtester.run(df, setups)
 
     periods_per_year = (365 * 86400) / RESOLUTION_SECONDS[args.resolution]
     metrics = compute_metrics(result.equity_curve, result.trades, args.capital, periods_per_year)
 
-    fee_side = "maker" if args.maker else "taker"
-    fee_pct = settings.maker_fee_pct if args.maker else settings.taker_fee_pct
     print("\n" + "=" * 60)
     print(f"Strategy: {args.strategy}  |  {args.symbol} {args.resolution}  |  {args.start} -> {args.end}")
     if strategy_info["needs_daily_data"]:
         print(f"Pivot period: {args.pivot_period}")
-    print(f"Fees assumed: {fee_side} {fee_pct}% + {settings.gst_pct}% GST on the fee "
-          f"(source: delta.exchange/fees, perpetual futures schedule)")
+    if strategy_info["kind"] == "pattern" and args.maker_on_target_only:
+        print(f"Fees assumed: taker {settings.taker_fee_pct}% on entry/stop/eod_forced/signal_exit, "
+              f"maker {settings.maker_fee_pct}% on target hits, + {settings.gst_pct}% GST on the fee "
+              f"(source: delta.exchange/fees) - the realistic maker scenario")
+    else:
+        fee_side = "maker" if args.maker else "taker"
+        fee_pct = settings.maker_fee_pct if args.maker else settings.taker_fee_pct
+        print(f"Fees assumed: {fee_side} {fee_pct}% + {settings.gst_pct}% GST on the fee "
+              f"(source: delta.exchange/fees, perpetual futures schedule)"
+              + ("  [optimistic: assumes maker on every fill]" if args.maker else ""))
     if strategy_info["kind"] == "pattern" and args.risk_pct_per_trade is not None:
         print(f"Position sizing: {args.risk_pct_per_trade}% equity risk per trade "
               f"(capped at {args.leverage}x equity buying power)")

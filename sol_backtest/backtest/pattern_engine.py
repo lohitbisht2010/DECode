@@ -48,6 +48,7 @@ class PatternBacktester:
         risk_pct_per_trade: Optional[float] = None,
         reward_multiple: Optional[float] = None,
         max_consecutive_losses_per_day: Optional[int] = None,
+        maker_on_target_only: bool = False,
     ):
         """risk_pct_per_trade: if set, position size is derived from the
         stop distance so a stop-out loses exactly this % of current equity
@@ -72,6 +73,16 @@ class PatternBacktester:
         The streak and the block both reset at the next day boundary,
         independent of whether the prior day ended blocked. A winning
         trade resets the streak immediately, even mid-day.
+
+        maker_on_target_only: a more realistic alternative to
+        assume_maker_fees=True (which optimistically assumes every fill,
+        including entries and stop-outs, gets the cheaper maker rate).
+        Entries and stop/eod_forced/signal_exit closes are immediate,
+        urgency-driven fills - realistically taker. Only a target hit is
+        genuinely a resting limit order filled by someone else's market
+        order, so only target exits get the maker rate here; everything
+        else pays taker regardless of assume_maker_fees. Takes priority
+        over assume_maker_fees when both are set.
         """
         self.fee_model = fee_model
         self.initial_capital = initial_capital
@@ -81,6 +92,13 @@ class PatternBacktester:
         self.risk_pct_per_trade = risk_pct_per_trade
         self.reward_multiple = reward_multiple
         self.max_consecutive_losses_per_day = max_consecutive_losses_per_day
+        self.maker_on_target_only = maker_on_target_only
+
+    def _is_maker_fill(self, reason: Optional[str]) -> bool:
+        """reason=None means an entry fill; otherwise an exit_reason."""
+        if self.maker_on_target_only:
+            return reason == "target"
+        return self.is_maker
 
     def _open(self, equity: float, price: float, direction: int, time: int,
               stop_price: float, target_price: float, tag: str = "") -> Optional[PatternTrade]:
@@ -105,7 +123,7 @@ class PatternBacktester:
             # short (direction=-1): target below entry. long (direction=1): target above entry.
             target_price = price + direction * self.reward_multiple * risk_per_unit
 
-        fee = self.fee_model.fee_for_trade(notional, self.is_maker)
+        fee = self.fee_model.fee_for_trade(notional, self._is_maker_fill(None))
         return PatternTrade(
             direction=direction, entry_time=time, entry_price=price, qty=qty,
             entry_fee=fee, stop_price=stop_price, target_price=target_price, tag=tag,
@@ -113,7 +131,7 @@ class PatternBacktester:
 
     def _close(self, trade: PatternTrade, price: float, time: int, reason: str) -> float:
         notional = price * trade.qty
-        fee = self.fee_model.fee_for_trade(notional, self.is_maker)
+        fee = self.fee_model.fee_for_trade(notional, self._is_maker_fill(reason))
         trade.exit_time = time
         trade.exit_price = price
         trade.exit_fee = fee

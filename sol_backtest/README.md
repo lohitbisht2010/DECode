@@ -425,7 +425,40 @@ testing, it barely engaged for `pivot_r1_rejection` and
 days to begin with), so it moved the combined result by under $500 on
 either symbol. If a strategy is losing money because of trade *count* and
 per-trade fee cost rather than same-day loss clustering, this flag won't
-address that - fewer/larger trades (`--reward-multiple`, `--maker`) will.
+address that - fewer/larger trades (`--reward-multiple`) or cheaper fills
+(`--maker-on-target-only`, below) will.
+
+### Realistic vs optimistic maker fees (`--maker-on-target-only`)
+
+`--maker` (existing) assumes maker fees on *every* fill, including
+entries and stop-outs - unrealistic, since those need to execute
+immediately (a stop firing is a forced exit; an entry triggered by a
+pattern needs to happen now, not whenever a resting order eventually
+gets filled). `--maker-on-target-only` is the honest version: only a
+**target hit** is genuinely a resting limit order someone else's market
+order fills, so only that leg gets the maker rate (`FeeModel`'s
+`maker_fee_pct`); entries, stops, `eod_forced`, and `signal_exit` closes
+all stay taker regardless. It overrides `--maker` when both are passed.
+
+**Real check** (BTCUSD, 2025-01-01 → 2026-07-01, 15m, 1% risk, 5x
+leverage, `pivot_r1_rejection` + `pivot_ladder_rejection` combined
+50/50) - three fee scenarios on the *same* trades:
+
+| scenario | combined fees | combined net P&L |
+|---|---|---|
+| taker (baseline) | 59,805 | -20,665 (-20.7%) |
+| **realistic** (`--maker-on-target-only`) | 57,056 | -16,557 (-16.6%) |
+| optimistic (`--maker`, every fill) | 31,999 | **+21,900 (+21.9%)** |
+
+The realistic scenario barely moves the needle (~5% fee reduction) since
+most exits are stops, not targets, and stops don't qualify. The
+optimistic ceiling looks great but assumes an execution model these
+strategies can't actually deliver. The honest takeaway: fee-side
+optimization alone won't flip this portfolio profitable. `pivot_r1_rejection`
+run **alone** (not diluted 50/50 with the weaker-ratio ladder strategy)
+gets closest: -2.2% return, profit factor 0.96, fees at 110% of gross -
+essentially break-even, and the best result found across every
+configuration tested in this project so far.
 
 ## Tests
 
@@ -434,7 +467,7 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-74 tests covering: fee calculation (GST, maker vs taker, absolute
+77 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
 double-fee-counting bug caught during development), risk-based position
@@ -443,15 +476,17 @@ capping, zero-stop-distance handling), the fixed risk:reward target
 (hand-verified against long/short entry prices, and a combined 1%-risk/
 4%-target scenario), the daily loss-streak circuit breaker (the block,
 the day-boundary reset, a winning trade resetting the streak), the
-NaN-target/`exit_signal` machinery (trend-flip exits, stop-vs-signal
-priority), the Supertrend indicator (hand-traced through its recursive
-sticky-band logic), fetcher pagination/caching, both daily and monthly
-pivot point formulas and period dispatch, all four patterns'
-condition-by-condition detection (including the ladder's
-highest-level-wins priority rule), portfolio combination math (trade
-scaling, weighted equity curves, return correlation), and the trade CSV
-export — all against synthetic data, no live API access required except
-for the real-data validation runs whose results are quoted above.
+realistic per-leg maker/taker fee mode (taker on entry/stop, maker only
+on target hits, and that it overrides `--maker`), the NaN-target/
+`exit_signal` machinery (trend-flip exits, stop-vs-signal priority), the
+Supertrend indicator (hand-traced through its recursive sticky-band
+logic), fetcher pagination/caching, both daily and monthly pivot point
+formulas and period dispatch, all four patterns' condition-by-condition
+detection (including the ladder's highest-level-wins priority rule),
+portfolio combination math (trade scaling, weighted equity curves,
+return correlation), and the trade CSV export — all against synthetic
+data, no live API access required except for the real-data validation
+runs whose results are quoted above.
 
 ## Known limitations
 
