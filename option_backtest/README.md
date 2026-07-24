@@ -72,7 +72,49 @@ a guarantee the position would actually be marginable.
 
 ## Real backtest results
 
-<!-- filled in after running against real Delta India data -->
+Backtested against Delta India's full available BTC option history
+(2023-12-28 → 2026-07-24), 1% equity risk per cycle, real taker=maker
+fees + 18% GST, entering `--entry-hours-before-expiry 18` (i.e. selling
+~18 hours before each daily 12:00 UTC settlement):
+
+| target OTM % | entry window | cycles | win% | profit factor | fees as % of gross | net return | Sharpe | max DD |
+|---|---|---|---|---|---|---|---|---|
+| 5% | 6h before expiry | 30 (June only, noisy) | 0% | 0.00 | 5012% | -3.4% | -316.6 | -3.3% |
+| **1%** | **18h before expiry** | **861 (full history)** | **65.7%** | **1.16** | **74.3%** | **+17.7%** | **1.22** | **-4.9%** |
+
+The 5% row is the important negative control: at far-OTM strikes with
+only 6 hours of remaining life, the option premium is so small (real
+dollar premium per contract is `quote_price * 0.001` - often a fraction
+of a cent) that Delta's fee, charged on the full underlying notional
+regardless of premium, was **50x the entire gross edge** - not a
+parameter to tune away, a structural mismatch between "sell deep-OTM,
+short-dated options" and "fee on notional, not premium."
+
+Moving the strike near the money (1% OTM) and giving the position real
+time value to decay (18h instead of 6h) fixes that: the 1% OTM
+configuration nets **+17.7% return over ~2.5 years (CAGR 7.13%, Sharpe
+1.22)** across 861 real traded cycles (76 of 937 expiries skipped for
+missing premium data, mostly in the earliest days after daily BTC options
+launched). Fees still consume 74% of the gross edge, so this remains a
+fee-sensitive strategy - but for the first time in this project, gross
+edge convincingly survives real Delta fees. Compare against `sol_backtest`'s
+best futures result (`donchian_trend`, Sharpe ~0.48, PF 2.05, +6.5%): this
+strangle has a lower profit factor per trade but a much larger sample
+(861 cycles vs. 13) and a comparably strong risk-adjusted return, with
+a noticeably shallower max drawdown (-4.9% vs -5.8% to -24.6% depending
+on config).
+
+A 30-day sample size is not enough to trust any of this - the same 1%
+OTM/18h config that nets +17.7% over the full history showed wildly
+different-looking gross P&L across nearby parameters on a 30-day June-only
+window (0.5% OTM swung from -$2,327 gross at a 12h entry to +$670 at an
+18h entry on the *same 30 days*). Only the full-history run has enough
+cycles (861) to separate real edge from noise.
+
+```bash
+python -m option_backtest.main --start 2023-12-28 --end 2026-07-24 \
+    --entry-hours-before-expiry 18 --target-otm-pct 1 --risk-pct-per-trade 1
+```
 
 ## Known limitations
 
