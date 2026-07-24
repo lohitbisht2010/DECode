@@ -19,11 +19,17 @@ rejected wins, since that's the more extreme (and more informative) level
 to have been rejected at. Stop is always the signal bar's own high,
 matching every other rejection variant. There's no rejection *at* S3
 (nothing below it to target), so it's excluded from the ladder.
+
+Levels come from the previous period's pivot (pivots.py) - defaults to
+the previous UTC day, or the previous calendar month via
+pivot_period="monthly" (wider levels, fewer signals, smaller position
+size under risk-based sizing since stop distance grows with level
+spacing).
 """
 import numpy as np
 import pandas as pd
 
-from sol_backtest.pivots import attach_previous_day_pivots
+from sol_backtest.pivots import VALID_PIVOT_PERIODS, attach_pivots
 from sol_backtest.strategies.pattern_base import PatternStrategy
 
 # (trigger level, target level), highest trigger first so it takes priority
@@ -39,11 +45,14 @@ LADDER = [
 
 
 class PivotLadderRejectionStrategy(PatternStrategy):
-    def __init__(self, daily_df: pd.DataFrame):
+    def __init__(self, daily_df: pd.DataFrame, pivot_period: str = "daily"):
+        if pivot_period not in VALID_PIVOT_PERIODS:
+            raise ValueError(f"pivot_period must be one of {sorted(VALID_PIVOT_PERIODS)}, got {pivot_period!r}")
         self.daily_df = daily_df
+        self.pivot_period = pivot_period
 
     def generate_setups(self, df: pd.DataFrame) -> pd.DataFrame:
-        merged = attach_previous_day_pivots(df, self.daily_df)
+        merged = attach_pivots(df, self.daily_df, self.pivot_period)
 
         prev_high = merged["high"].shift(1)
         prev_open = merged["open"].shift(1)

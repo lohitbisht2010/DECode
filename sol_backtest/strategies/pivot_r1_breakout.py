@@ -13,8 +13,9 @@ Condition 1 restricts signals to the *first* bar that closes through R1,
 so the pattern doesn't keep re-firing on every bar while price simply
 holds above it.
 
-R1 comes from the previous UTC day's daily pivot (pivots.py). Trade plan:
-long at the next bar's open, stop at the breakout bar's own low
+R1 comes from the previous period's pivot (pivots.py) - defaults to the
+previous UTC day, or the previous calendar month via pivot_period="monthly".
+Trade plan: long at the next bar's open, stop at the breakout bar's own low
 (invalidated if price falls back below it), target at a configurable
 pivot level - defaults to R2, the natural next resistance above a broken
 R1 (unlike the rejection strategy, PP/S1 sit *behind* a long entry here
@@ -22,19 +23,22 @@ and wouldn't make sense as a default target).
 """
 import pandas as pd
 
-from sol_backtest.pivots import VALID_PIVOT_LEVELS, attach_previous_day_pivots
+from sol_backtest.pivots import VALID_PIVOT_LEVELS, VALID_PIVOT_PERIODS, attach_pivots
 from sol_backtest.strategies.pattern_base import PatternStrategy
 
 
 class PivotR1BreakoutStrategy(PatternStrategy):
-    def __init__(self, daily_df: pd.DataFrame, target_level: str = "r2"):
+    def __init__(self, daily_df: pd.DataFrame, target_level: str = "r2", pivot_period: str = "daily"):
         if target_level not in VALID_PIVOT_LEVELS:
             raise ValueError(f"target_level must be one of {sorted(VALID_PIVOT_LEVELS)}, got {target_level!r}")
+        if pivot_period not in VALID_PIVOT_PERIODS:
+            raise ValueError(f"pivot_period must be one of {sorted(VALID_PIVOT_PERIODS)}, got {pivot_period!r}")
         self.daily_df = daily_df
         self.target_level = target_level
+        self.pivot_period = pivot_period
 
     def generate_setups(self, df: pd.DataFrame) -> pd.DataFrame:
-        merged = attach_previous_day_pivots(df, self.daily_df)
+        merged = attach_pivots(df, self.daily_df, self.pivot_period)
 
         prev_high = merged["high"].shift(1)
         prev_close = merged["close"].shift(1)

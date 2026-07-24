@@ -169,6 +169,51 @@ standards, but this is nominally a trend-*continuation* trade, so it gets
 stopped out before the trend has room to reassert itself more often than
 it survives to actually ride the continuation.
 
+## Pivot period: daily vs monthly (`--pivot-period`)
+
+`pivot_r1_rejection`, `pivot_r1_breakout`, and `pivot_ladder_rejection`
+all default to daily pivots (yesterday's UTC day). `--pivot-period
+monthly` switches them to pivots computed from **last calendar month's**
+OHLC instead - aggregated from the same daily candles already being
+fetched (open of the month's first day, high/low across the whole month,
+close of the last day), not a native exchange resolution, since a
+calendar month isn't a fixed number of days. `pivots.py`'s
+`attach_pivots(df, daily_df, period=...)` dispatches between the two;
+the daily-data lookback window widens automatically (35 days instead of
+2) so there's always a full previous month available.
+
+Monthly levels sit much farther from price than daily ones, which has a
+direct, mechanical effect under `--risk-pct-per-trade` sizing: stop
+distance = |entry - stop|, and qty = risk_amount / stop_distance, so a
+wider stop means a *smaller* position for the same % risk. Real check
+(SOLUSD, `pivot_r1_rejection`, 1% risk): average position size dropped
+from **~1,460 units** (15m bars, daily pivots) to **~433 units** (1h
+bars, monthly pivots) — about 3.4x smaller, exactly the mechanical
+consequence of wider stops.
+
+**Real result** (2025-01-01 → 2026-07-01, 1h, monthly pivots, 1% risk,
+5x leverage, `pivot_r1_rejection` + `pivot_ladder_rejection` combined
+50/50):
+
+| | SOLUSD | BTCUSD |
+|---|---|---|
+| Combined trades | 47 | 36 |
+| Combined gross P&L | -16,793 | -3,731 |
+| Combined fees | 2,273 | 3,184 |
+| Combined net P&L | **-19,065 (-19.1%)** | **-6,915 (-6.9%)** |
+
+Fees did shrink dramatically as a share of the picture (13-34 trades
+instead of 71-346; fees went from ~50-95k down to ~2-5k) - the mechanical
+goal was achieved. But it didn't fix profitability, because the
+*underlying edge got worse*, not better: `pivot_r1_rejection` had a 0%
+win rate on both symbols (13 straight losses on SOL, 5 on BTC) at this
+setting. Monthly R1 is a much more extreme, rarely-touched level; by the
+time price actually reaches it the move is often strong enough that a
+same-bar rejection candle doesn't reliably mark a turn the way it can at
+a nearer, more frequently-tested daily level. BTC came out least-bad of
+everything tested so far (-6.9%, close to break-even) - worth a longer
+look specifically, but SOL at this configuration is still a clear loser.
+
 ## Plugging in a different pattern
 
 Two extension points depending on how your strategy exits a position:
@@ -389,22 +434,24 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-71 tests covering: fee calculation (GST, maker vs taker, absolute
+74 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
 double-fee-counting bug caught during development), risk-based position
 sizing (hand-verified stop-out losses exactly N% of equity, leverage
 capping, zero-stop-distance handling), the fixed risk:reward target
 (hand-verified against long/short entry prices, and a combined 1%-risk/
-4%-target scenario), the NaN-target/`exit_signal` machinery (trend-flip
-exits, stop-vs-signal priority), the Supertrend indicator (hand-traced
-through its recursive sticky-band logic), fetcher pagination/caching,
-pivot point formulas, all four patterns' condition-by-condition detection
-(including the ladder's highest-level-wins priority rule), portfolio
-combination math (trade scaling, weighted equity curves, return
-correlation), and the trade CSV export — all against synthetic data, no
-live API access required except for the one real-data validation run
-whose results are quoted above.
+4%-target scenario), the daily loss-streak circuit breaker (the block,
+the day-boundary reset, a winning trade resetting the streak), the
+NaN-target/`exit_signal` machinery (trend-flip exits, stop-vs-signal
+priority), the Supertrend indicator (hand-traced through its recursive
+sticky-band logic), fetcher pagination/caching, both daily and monthly
+pivot point formulas and period dispatch, all four patterns'
+condition-by-condition detection (including the ladder's
+highest-level-wins priority rule), portfolio combination math (trade
+scaling, weighted equity curves, return correlation), and the trade CSV
+export — all against synthetic data, no live API access required except
+for the real-data validation runs whose results are quoted above.
 
 ## Known limitations
 

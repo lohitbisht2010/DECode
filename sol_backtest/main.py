@@ -54,19 +54,23 @@ STRATEGIES = {
     },
     "pivot_r1_rejection": {
         "kind": "pattern",
-        "factory": lambda args, daily_df: PivotR1RejectionStrategy(daily_df, target_level=args.target_level),
+        "factory": lambda args, daily_df: PivotR1RejectionStrategy(
+            daily_df, target_level=args.target_level, pivot_period=args.pivot_period,
+        ),
         "needs_daily_data": True,
         "default_target_level": "pp",
     },
     "pivot_r1_breakout": {
         "kind": "pattern",
-        "factory": lambda args, daily_df: PivotR1BreakoutStrategy(daily_df, target_level=args.target_level),
+        "factory": lambda args, daily_df: PivotR1BreakoutStrategy(
+            daily_df, target_level=args.target_level, pivot_period=args.pivot_period,
+        ),
         "needs_daily_data": True,
         "default_target_level": "r2",
     },
     "pivot_ladder_rejection": {
         "kind": "pattern",
-        "factory": lambda args, daily_df: PivotLadderRejectionStrategy(daily_df),
+        "factory": lambda args, daily_df: PivotLadderRejectionStrategy(daily_df, pivot_period=args.pivot_period),
         "needs_daily_data": True,
         "default_target_level": None,  # target is fixed by the ladder rung, not configurable
     },
@@ -80,7 +84,12 @@ STRATEGIES = {
     },
 }
 
-DAILY_PIVOT_LOOKBACK_DAYS = 2  # extra days of daily data fetched before `start` so the first bar has a prior-day pivot
+DAILY_PIVOT_LOOKBACK_DAYS = 2     # daily pivots: only need yesterday's candle
+MONTHLY_PIVOT_LOOKBACK_DAYS = 35  # monthly pivots: need a full previous calendar month (max 31 days) + margin
+
+
+def _daily_lookback_days(pivot_period: str) -> int:
+    return MONTHLY_PIVOT_LOOKBACK_DAYS if pivot_period == "monthly" else DAILY_PIVOT_LOOKBACK_DAYS
 
 
 def _to_unix(date_str: str) -> int:
@@ -102,6 +111,11 @@ def parse_args() -> argparse.Namespace:
                          "Defaults to PP for pivot_r1_rejection, R2 for pivot_r1_breakout. Not used by "
                          "pivot_ladder_rejection (target is fixed by the ladder rung) or supertrend_rejection "
                          "(no fixed target - exits on trend flip).")
+    p.add_argument("--pivot-period", default="daily", choices=["daily", "monthly"],
+                    help="pivot strategies: compute pivot levels from the previous UTC day (default) or the "
+                         "previous calendar month. Monthly levels are wider, so signals are rarer and - under "
+                         "risk-based sizing - positions are smaller, since stop distance scales with level "
+                         "spacing.")
     p.add_argument("--atr-period", type=int, default=10, help="supertrend_rejection: ATR period")
     p.add_argument("--supertrend-multiplier", type=float, default=3.0, help="supertrend_rejection: ATR multiplier")
     p.add_argument("--capital", type=float, default=settings.initial_capital)
@@ -146,8 +160,10 @@ def main() -> None:
 
     daily_df = None
     if strategy_info["needs_daily_data"]:
-        daily_start = start - DAILY_PIVOT_LOOKBACK_DAYS * 86400
-        print(f"Fetching {args.symbol} [1d] candles for pivot calculation ({DAILY_PIVOT_LOOKBACK_DAYS} day lookback)...")
+        lookback_days = _daily_lookback_days(args.pivot_period)
+        daily_start = start - lookback_days * 86400
+        print(f"Fetching {args.symbol} [1d] candles for {args.pivot_period} pivot calculation "
+              f"({lookback_days} day lookback)...")
         daily_df = fetch_candles(
             base_url=base_url, symbol=args.symbol, resolution="1d",
             start=daily_start, end=end, use_cache=not args.no_cache,
@@ -189,6 +205,8 @@ def main() -> None:
     fee_pct = settings.maker_fee_pct if args.maker else settings.taker_fee_pct
     print("\n" + "=" * 60)
     print(f"Strategy: {args.strategy}  |  {args.symbol} {args.resolution}  |  {args.start} -> {args.end}")
+    if strategy_info["needs_daily_data"]:
+        print(f"Pivot period: {args.pivot_period}")
     print(f"Fees assumed: {fee_side} {fee_pct}% + {settings.gst_pct}% GST on the fee "
           f"(source: delta.exchange/fees, perpetual futures schedule)")
     if strategy_info["kind"] == "pattern" and args.risk_pct_per_trade is not None:

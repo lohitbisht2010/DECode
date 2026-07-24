@@ -9,29 +9,35 @@ immediately before it):
   5. current.high   >= R1                  (pokes at/through the pivot resistance)
   6. current.close  <  R1                  (but closes back below it - a rejection)
 
-R1 comes from the previous UTC day's daily pivot (pivots.py). Trade plan:
-short at the next bar's open, stop at the signal bar's high (pattern
+R1 comes from the previous period's pivot (pivots.py) - defaults to the
+previous UTC day, or the previous calendar month via pivot_period="monthly"
+(wider levels, fewer/rarer signals, and - since stop distance grows with
+level spacing - smaller position size under risk-based sizing). Trade
+plan: short at the next bar's open, stop at the signal bar's high (pattern
 invalidated if price keeps going), target at a configurable pivot level
 (defaults to PP, the "fade back to the pivot" trade; pass target_level="s1"
 for a deeper fade to the first support level).
 """
 import pandas as pd
 
-from sol_backtest.pivots import VALID_PIVOT_LEVELS, attach_previous_day_pivots
+from sol_backtest.pivots import VALID_PIVOT_LEVELS, VALID_PIVOT_PERIODS, attach_pivots
 from sol_backtest.strategies.pattern_base import PatternStrategy
 
 VALID_TARGET_LEVELS = VALID_PIVOT_LEVELS  # kept as an alias for backwards compatibility
 
 
 class PivotR1RejectionStrategy(PatternStrategy):
-    def __init__(self, daily_df: pd.DataFrame, target_level: str = "pp"):
+    def __init__(self, daily_df: pd.DataFrame, target_level: str = "pp", pivot_period: str = "daily"):
         if target_level not in VALID_PIVOT_LEVELS:
             raise ValueError(f"target_level must be one of {sorted(VALID_PIVOT_LEVELS)}, got {target_level!r}")
+        if pivot_period not in VALID_PIVOT_PERIODS:
+            raise ValueError(f"pivot_period must be one of {sorted(VALID_PIVOT_PERIODS)}, got {pivot_period!r}")
         self.daily_df = daily_df
         self.target_level = target_level
+        self.pivot_period = pivot_period
 
     def generate_setups(self, df: pd.DataFrame) -> pd.DataFrame:
-        merged = attach_previous_day_pivots(df, self.daily_df)
+        merged = attach_pivots(df, self.daily_df, self.pivot_period)
 
         prev_high = merged["high"].shift(1)
         prev_open = merged["open"].shift(1)

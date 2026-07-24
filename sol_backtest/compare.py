@@ -19,7 +19,7 @@ from sol_backtest.backtest.pattern_engine import PatternBacktester
 from sol_backtest.config import RESOLUTION_SECONDS, base_url_for, settings
 from sol_backtest.data.fetcher import fetch_candles
 from sol_backtest.fees import FeeModel
-from sol_backtest.main import DAILY_PIVOT_LOOKBACK_DAYS, STRATEGIES, _to_unix
+from sol_backtest.main import STRATEGIES, _daily_lookback_days, _to_unix
 from sol_backtest.portfolio import combine_equity_curves, combine_trades, compute_return_correlation
 from sol_backtest.reporting import save_trades_csv
 
@@ -38,6 +38,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weights", default=None,
                     help="Comma-separated portfolio weights matching --strategies, must sum to 1.0. "
                          "Default: equal weight across all selected strategies.")
+    p.add_argument("--pivot-period", default="daily", choices=["daily", "monthly"],
+                    help="Applied identically to every pivot-based strategy being compared - see main.py's "
+                         "help for details.")
     p.add_argument("--capital", type=float, default=settings.initial_capital)
     p.add_argument("--leverage", type=float, default=settings.leverage)
     p.add_argument("--allocation-pct", type=float, default=settings.allocation_pct)
@@ -52,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _build_strategy(name: str, daily_df):
+def _build_strategy(name: str, daily_df, pivot_period: str):
     info = STRATEGIES[name]
     if info["kind"] != "pattern":
         raise ValueError(f"{name} is not a pattern-kind strategy; compare.py only supports pattern strategies")
@@ -60,6 +63,7 @@ def _build_strategy(name: str, daily_df):
         target_level=info["default_target_level"],
         fast=10, slow=30,
         atr_period=10, supertrend_multiplier=3.0,
+        pivot_period=pivot_period,
     )
     return info["factory"](ns, daily_df)
 
@@ -88,8 +92,8 @@ def main() -> None:
 
     daily_df = None
     if any(STRATEGIES[name]["needs_daily_data"] for name in strategy_names):
-        daily_start = start - DAILY_PIVOT_LOOKBACK_DAYS * 86400
-        print(f"Fetching {args.symbol} [1d] candles for pivot calculation...")
+        daily_start = start - _daily_lookback_days(args.pivot_period) * 86400
+        print(f"Fetching {args.symbol} [1d] candles for {args.pivot_period} pivot calculation...")
         daily_df = fetch_candles(base_url=base_url, symbol=args.symbol, resolution="1d",
                                   start=daily_start, end=end, use_cache=not args.no_cache)
 
@@ -99,7 +103,7 @@ def main() -> None:
 
     results = {}
     for name in strategy_names:
-        strategy = _build_strategy(name, daily_df)
+        strategy = _build_strategy(name, daily_df, args.pivot_period)
         setups = strategy.generate_setups(df)
         backtester = PatternBacktester(
             fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
