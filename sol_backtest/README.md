@@ -368,6 +368,20 @@ to sit that day. `--reward-multiple` can be used with either sizing mode
 (it only changes where the target is, not the position size); like
 `--risk-pct-per-trade`, it's ignored (with a warning) for `sma_crossover`.
 
+### Daily loss-streak circuit breaker (`--max-consecutive-losses-per-day`)
+
+`--max-consecutive-losses-per-day N` stops taking new entries for the
+rest of the UTC calendar day once N trades in a row have closed at a net
+loss. The streak (and any block) resets at the next day boundary; a
+winning trade resets the streak immediately, even mid-day. It's a risk
+control on a bad *day*, not a fix for a strategy's underlying edge - in
+testing, it barely engaged for `pivot_r1_rejection` and
+`pivot_ladder_rejection` (their losses aren't clustered within single
+days to begin with), so it moved the combined result by under $500 on
+either symbol. If a strategy is losing money because of trade *count* and
+per-trade fee cost rather than same-day loss clustering, this flag won't
+address that - fewer/larger trades (`--reward-multiple`, `--maker`) will.
+
 ## Tests
 
 ```bash
@@ -375,7 +389,7 @@ pip install pytest
 python -m pytest sol_backtest/tests -v
 ```
 
-67 tests covering: fee calculation (GST, maker vs taker, absolute
+71 tests covering: fee calculation (GST, maker vs taker, absolute
 notional), both backtest engines' fee accounting (hand-verified against
 manually computed equity, including regression tests for a
 double-fee-counting bug caught during development), risk-based position

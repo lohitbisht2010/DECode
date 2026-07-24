@@ -47,6 +47,7 @@ class PatternBacktester:
         assume_maker_fees: bool = False,
         risk_pct_per_trade: Optional[float] = None,
         reward_multiple: Optional[float] = None,
+        max_consecutive_losses_per_day: Optional[int] = None,
     ):
         """risk_pct_per_trade: if set, position size is derived from the
         stop distance so a stop-out loses exactly this % of current equity
@@ -64,6 +65,13 @@ class PatternBacktester:
         risk_pct_per_trade=1 and reward_multiple=4 for "risk 1%, target 4%"
         sizing. When None (default), the setup's own target_price is used
         as-is (which may itself be NaN for a no-fixed-target strategy).
+
+        max_consecutive_losses_per_day: if set, once this many trades in a
+        row close at a net loss (net_pnl <= 0) *within the same UTC
+        calendar day*, no new entries are taken for the rest of that day.
+        The streak and the block both reset at the next day boundary,
+        independent of whether the prior day ended blocked. A winning
+        trade resets the streak immediately, even mid-day.
         """
         self.fee_model = fee_model
         self.initial_capital = initial_capital
@@ -72,6 +80,7 @@ class PatternBacktester:
         self.is_maker = assume_maker_fees
         self.risk_pct_per_trade = risk_pct_per_trade
         self.reward_multiple = reward_multiple
+        self.max_consecutive_losses_per_day = max_consecutive_losses_per_day
 
     def _open(self, equity: float, price: float, direction: int, time: int,
               stop_price: float, target_price: float, tag: str = "") -> Optional[PatternTrade]:
@@ -137,11 +146,29 @@ class PatternBacktester:
         has_tag = "tag" in setups.columns
         tag_arr = setups["tag"].to_numpy() if has_tag else None
 
+        max_losses = self.max_consecutive_losses_per_day
+        consecutive_losses = 0
+        loss_streak_day = None
+        blocked_day = None
+
+        def record_close_for_loss_streak(trade: PatternTrade, exit_time: int) -> None:
+            nonlocal consecutive_losses, loss_streak_day, blocked_day
+            if max_losses is None:
+                return
+            exit_day = int(exit_time) // 86400
+            if loss_streak_day != exit_day:
+                consecutive_losses = 0
+                loss_streak_day = exit_day
+            consecutive_losses = consecutive_losses + 1 if trade.net_pnl <= 0 else 0
+            if consecutive_losses >= max_losses:
+                blocked_day = exit_day
+
         for i in range(len(df)):
             # A trend-flip-style exit decided from bar i-1's close fills at this bar's open.
             if pending_exit and open_trade is not None:
                 equity += self._close(open_trade, opens[i], times[i], "signal_exit")
                 trades.append(open_trade)
+                record_close_for_loss_streak(open_trade, times[i])
                 open_trade = None
                 pending_exit = False
 
@@ -168,11 +195,14 @@ class PatternBacktester:
                     exit_price = open_trade.stop_price if hit_stop else target_price
                     equity += self._close(open_trade, exit_price, times[i], reason)
                     trades.append(open_trade)
+                    record_close_for_loss_streak(open_trade, times[i])
                     open_trade = None
                 elif has_exit_signal and bool(exit_signal_arr[i]):
                     pending_exit = True
 
-            if open_trade is None and pending_entry is None and bool(entry_signal[i]):
+            bar_day = int(times[i]) // 86400
+            day_is_blocked = max_losses is not None and blocked_day == bar_day
+            if open_trade is None and pending_entry is None and not day_is_blocked and bool(entry_signal[i]):
                 tag = str(tag_arr[i]) if has_tag else ""
                 pending_entry = (int(direction_arr[i]), float(stop_arr[i]), float(target_arr[i]), tag)
 
@@ -184,6 +214,7 @@ class PatternBacktester:
         if open_trade is not None:
             equity += self._close(open_trade, closes[-1], times[-1], "eod_forced")
             trades.append(open_trade)
+            record_close_for_loss_streak(open_trade, times[-1])
             equity_curve[-1] = equity
 
         curve = pd.Series(equity_curve, index=pd.to_datetime(times, unit="s"), name="equity")

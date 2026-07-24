@@ -118,6 +118,10 @@ def parse_args() -> argparse.Namespace:
                          "stop distance from the actual entry price, overriding --target-level's pivot-based "
                          "target. E.g. with --risk-pct-per-trade 1, --reward-multiple 4 means a stop-out loses "
                          "1%% of equity and hitting target gains 4%% - a 1:4 risk:reward setup.")
+    p.add_argument("--max-consecutive-losses-per-day", type=int, default=None,
+                    help="Pattern strategies only: after this many losing trades in a row within the same UTC "
+                         "calendar day, stop taking new entries for the rest of that day. Resets at the next "
+                         "day boundary; a winning trade resets the streak immediately.")
     p.add_argument("--maker", action="store_true", help="Assume maker fees instead of taker")
     p.add_argument("--no-cache", action="store_true", help="Bypass the local candle cache")
     p.add_argument("--no-csv", action="store_true", help="Skip writing the per-trade CSV to sol_backtest/results/")
@@ -174,6 +178,7 @@ def main() -> None:
             fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
             allocation_pct=args.allocation_pct, assume_maker_fees=args.maker,
             risk_pct_per_trade=args.risk_pct_per_trade, reward_multiple=args.reward_multiple,
+            max_consecutive_losses_per_day=args.max_consecutive_losses_per_day,
         )
         result = backtester.run(df, setups)
 

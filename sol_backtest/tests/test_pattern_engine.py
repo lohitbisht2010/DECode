@@ -331,3 +331,125 @@ def test_nan_target_never_triggers_a_target_exit():
     trade = result.trades[0]
     assert trade.exit_reason == "eod_forced"  # never a "target" exit despite the huge favorable move
     assert trade.exit_price == 50.0
+
+
+def _loss_cycle(entry_price=100.0, stop=101.0, target=float("nan")):
+    """(signal_row, resolution_row) for a losing trade: entry then an
+    immediate stop-out on the very next bar."""
+    signal = dict(open=entry_price, high=entry_price, low=entry_price, close=entry_price,
+                   entry_signal=True, stop=stop, target=target)
+    resolve = dict(open=entry_price, high=stop + 1, low=entry_price - 1, close=entry_price,
+                    entry_signal=False, stop=stop, target=target)
+    return signal, resolve
+
+
+def _win_cycle(entry_price=100.0, stop=105.0, target=95.0):
+    """(signal_row, resolution_row) for a winning trade: entry then an
+    immediate target-hit on the very next bar."""
+    signal = dict(open=entry_price, high=entry_price, low=entry_price, close=entry_price,
+                   entry_signal=True, stop=stop, target=target)
+    resolve = dict(open=entry_price, high=entry_price + 1, low=target - 1, close=entry_price - 3,
+                    entry_signal=False, stop=stop, target=target)
+    return signal, resolve
+
+
+def _build_from_cycles(cycles, start_time=0, step=900):
+    """cycles: list of (signal_row, resolve_row) dict pairs -> (df, setups) with
+    one bar per row, `step` seconds apart starting at `start_time`."""
+    rows = [row for cycle in cycles for row in cycle]
+    n = len(rows)
+    times = [start_time + i * step for i in range(n)]
+    df = pd.DataFrame({
+        "time": times,
+        "open": [r["open"] for r in rows],
+        "high": [r["high"] for r in rows],
+        "low": [r["low"] for r in rows],
+        "close": [r["close"] for r in rows],
+        "volume": [1] * n,
+    })
+    setups = pd.DataFrame({
+        "entry_signal": [r["entry_signal"] for r in rows],
+        "direction": [-1] * n,
+        "stop_price": [r["stop"] for r in rows],
+        "target_price": [r["target"] for r in rows],
+    })
+    return df, setups
+
+
+def test_blocks_new_entries_after_n_consecutive_losses_same_day():
+    cycles = [_loss_cycle(), _loss_cycle(), _loss_cycle()]
+    df, setups = _build_from_cycles(cycles)
+    # append one more signal bar (should be blocked) + a flat filler bar, same day
+    extra = pd.DataFrame({
+        "time": [df["time"].iloc[-1] + 900, df["time"].iloc[-1] + 1800],
+        "open": [100.0, 100.0], "high": [100.0, 100.0], "low": [100.0, 100.0], "close": [100.0, 100.0],
+        "volume": [1, 1],
+    })
+    extra_setups = pd.DataFrame({
+        "entry_signal": [True, False], "direction": [-1, -1],
+        "stop_price": [101.0, 101.0], "target_price": [float("nan"), float("nan")],
+    })
+    df = pd.concat([df, extra], ignore_index=True)
+    setups = pd.concat([setups, extra_setups], ignore_index=True)
+
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, max_consecutive_losses_per_day=3)
+    result = bt.run(df, setups)
+
+    assert len(result.trades) == 3  # the 4th signal never opened a trade
+    assert all(t.exit_reason == "stop" for t in result.trades)
+
+
+def test_no_block_without_the_cap_set():
+    cycles = [_loss_cycle(), _loss_cycle(), _loss_cycle(), _loss_cycle()]
+    df, setups = _build_from_cycles(cycles)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1, allocation_pct=100)
+    result = bt.run(df, setups)
+    assert len(result.trades) == 4  # no cap -> all four losing cycles trade
+
+
+def test_block_resets_at_next_day_boundary():
+    cycles = [_loss_cycle(), _loss_cycle(), _loss_cycle()]
+    df, setups = _build_from_cycles(cycles)  # 3 losses, all on day 0
+
+    day1_start = 86400
+    day1 = pd.DataFrame({
+        "time": [day1_start, day1_start + 900],
+        "open": [100.0, 100.0], "high": [100.0, 200.0], "low": [100.0, 100.0], "close": [100.0, 150.0],
+        "volume": [1, 1],
+    })
+    day1_setups = pd.DataFrame({
+        "entry_signal": [True, False], "direction": [-1, -1],
+        "stop_price": [999.0, 999.0], "target_price": [float("nan"), float("nan")],
+    })
+    df = pd.concat([df, day1], ignore_index=True)
+    setups = pd.concat([setups, day1_setups], ignore_index=True)
+
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, max_consecutive_losses_per_day=3)
+    result = bt.run(df, setups)
+
+    assert len(result.trades) == 4  # 3 losses on day 0, then a 4th trade opens fine on day 1
+
+
+def test_winning_trade_resets_the_streak():
+    # L, L, W, L, L - never 3 losses in a row, so a 6th signal should still open.
+    cycles = [_loss_cycle(), _loss_cycle(), _win_cycle(), _loss_cycle(), _loss_cycle()]
+    df, setups = _build_from_cycles(cycles)
+    extra = pd.DataFrame({
+        "time": [df["time"].iloc[-1] + 900, df["time"].iloc[-1] + 1800],
+        "open": [100.0, 100.0], "high": [100.0, 200.0], "low": [100.0, 100.0], "close": [100.0, 150.0],
+        "volume": [1, 1],
+    })
+    extra_setups = pd.DataFrame({
+        "entry_signal": [True, False], "direction": [-1, -1],
+        "stop_price": [999.0, 999.0], "target_price": [float("nan"), float("nan")],
+    })
+    df = pd.concat([df, extra], ignore_index=True)
+    setups = pd.concat([setups, extra_setups], ignore_index=True)
+
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, max_consecutive_losses_per_day=3)
+    result = bt.run(df, setups)
+
+    assert len(result.trades) == 6  # all 5 cycles plus the 6th signal, never blocked
