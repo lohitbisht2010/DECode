@@ -1,6 +1,31 @@
 import pandas as pd
 
-from sol_backtest.indicators import compute_supertrend
+from sol_backtest.indicators import compute_atr, compute_supertrend
+
+
+def test_compute_atr_matches_hand_calculation():
+    # period=1 -> Wilder-smoothed ATR degenerates to each bar's own True Range.
+    df = pd.DataFrame({
+        "high": [10.0, 12.0, 11.0, 15.0],
+        "low": [8.0, 9.0, 10.0, 10.0],
+        "close": [9.0, 11.0, 10.0, 14.0],
+    })
+    atr = compute_atr(df, period=1)
+    # TR0 = max(10-8, |10-9|, |8-9|) = 2; TR1 = max(12-9,|12-9|,|9-9|) = 3
+    # TR2 = max(11-10,|11-11|,|10-11|) = 1; TR3 = max(15-10,|15-10|,|10-10|) = 5
+    expected = [2.0, 3.0, 1.0, 5.0]
+    for i in range(len(df)):
+        assert abs(atr.iloc[i] - expected[i]) < 1e-9
+
+
+def test_compute_atr_warmup_period_is_nan():
+    df = pd.DataFrame({
+        "high": [10.0, 12.0, 11.0],
+        "low": [8.0, 9.0, 10.0],
+        "close": [9.0, 11.0, 10.0],
+    })
+    atr = compute_atr(df, period=10)
+    assert atr.isna().all()
 
 
 def test_compute_supertrend_matches_hand_calculation():

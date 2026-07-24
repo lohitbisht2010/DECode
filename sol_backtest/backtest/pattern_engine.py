@@ -49,6 +49,7 @@ class PatternBacktester:
         reward_multiple: Optional[float] = None,
         max_consecutive_losses_per_day: Optional[int] = None,
         maker_on_target_only: bool = False,
+        trailing_stop_atr_multiple: Optional[float] = None,
     ):
         """risk_pct_per_trade: if set, position size is derived from the
         stop distance so a stop-out loses exactly this % of current equity
@@ -83,6 +84,18 @@ class PatternBacktester:
         order, so only target exits get the maker rate here; everything
         else pays taker regardless of assume_maker_fees. Takes priority
         over assume_maker_fees when both are set.
+
+        trailing_stop_atr_multiple: if set, the stop ratchets toward the
+        best price seen since entry as the trade moves favorably - the
+        "chandelier exit" used by classic trend-following systems, so
+        losses are capped early but winners aren't cut off at a fixed
+        target. Long: stop = max(stop, highest_high_since_entry -
+        multiple*atr). Short: stop = min(stop, lowest_low_since_entry +
+        multiple*atr) - it only ever moves in the trade's favor, never
+        loosens. Requires setups to include an `atr` column (see
+        indicators.compute_atr); bars with a NaN atr (warmup period) skip
+        the ratchet for that bar. The setup's own stop_price is still
+        used as the initial floor before any favorable movement.
         """
         self.fee_model = fee_model
         self.initial_capital = initial_capital
@@ -93,6 +106,7 @@ class PatternBacktester:
         self.reward_multiple = reward_multiple
         self.max_consecutive_losses_per_day = max_consecutive_losses_per_day
         self.maker_on_target_only = maker_on_target_only
+        self.trailing_stop_atr_multiple = trailing_stop_atr_multiple
 
     def _is_maker_fill(self, reason: Optional[str]) -> bool:
         """reason=None means an entry fill; otherwise an exit_reason."""
@@ -164,6 +178,12 @@ class PatternBacktester:
         has_tag = "tag" in setups.columns
         tag_arr = setups["tag"].to_numpy() if has_tag else None
 
+        use_trailing_stop = self.trailing_stop_atr_multiple is not None
+        if use_trailing_stop and "atr" not in setups.columns:
+            raise ValueError("trailing_stop_atr_multiple is set but setups has no 'atr' column")
+        atr_arr = setups["atr"].to_numpy() if use_trailing_stop else None
+        extreme_since_entry = None
+
         max_losses = self.max_consecutive_losses_per_day
         consecutive_losses = 0
         loss_streak_day = None
@@ -196,7 +216,23 @@ class PatternBacktester:
                     open_trade = self._open(equity, opens[i], direction, times[i], stop_price, target_price, tag)
                     if open_trade is not None:
                         equity -= open_trade.entry_fee
+                        if use_trailing_stop:
+                            extreme_since_entry = highs[i] if direction == 1 else lows[i]
                 pending_entry = None
+
+            if open_trade is not None and use_trailing_stop:
+                if open_trade.direction == 1:
+                    extreme_since_entry = max(extreme_since_entry, highs[i])
+                else:
+                    extreme_since_entry = min(extreme_since_entry, lows[i])
+                atr = atr_arr[i]
+                if not math.isnan(atr):
+                    trail = extreme_since_entry - open_trade.direction * self.trailing_stop_atr_multiple * atr
+                    # only ever ratchet in the trade's favor, never loosen the stop
+                    if open_trade.direction == 1:
+                        open_trade.stop_price = max(open_trade.stop_price, trail)
+                    else:
+                        open_trade.stop_price = min(open_trade.stop_price, trail)
 
             if open_trade is not None:
                 target_price = open_trade.target_price

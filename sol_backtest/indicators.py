@@ -5,6 +5,26 @@ import numpy as np
 import pandas as pd
 
 
+def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Wilder-smoothed Average True Range. NaN for the warmup period before
+    `period` bars of data exist."""
+    high = df["high"].to_numpy(dtype=float)
+    low = df["low"].to_numpy(dtype=float)
+    close = df["close"].to_numpy(dtype=float)
+    n = len(df)
+
+    prev_close = np.concatenate(([close[0]], close[:-1])) if n else close
+    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+
+    atr = np.full(n, np.nan)
+    if n >= period:
+        atr[period - 1] = tr[:period].mean()
+        for i in range(period, n):
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+
+    return pd.Series(atr, index=df.index, name="atr")
+
+
 def compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
     """Standard ATR-based Supertrend (Wilder-smoothed ATR, sticky bands).
 
@@ -19,14 +39,7 @@ def compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3
     close = df["close"].to_numpy(dtype=float)
     n = len(df)
 
-    prev_close = np.concatenate(([close[0]], close[:-1])) if n else close
-    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
-
-    atr = np.full(n, np.nan)
-    if n >= period:
-        atr[period - 1] = tr[:period].mean()
-        for i in range(period, n):
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    atr = compute_atr(df, period).to_numpy()
 
     hl2 = (high + low) / 2
     basic_upper = hl2 + multiplier * atr

@@ -169,6 +169,66 @@ standards, but this is nominally a trend-*continuation* trade, so it gets
 stopped out before the trend has room to reassert itself more often than
 it survives to actually ride the continuation.
 
+## Strategy: Donchian breakout trend-follower (`donchian_trend`)
+
+Every strategy above is a mean-reversion pattern: fade a rejection at some
+level, many trades, small average win. Backtested against Delta's real
+fee schedule, all of them share the same structural problem — per-trade
+fees (taker ~0.059% round-trip-adjusted after 18% GST) consume most or
+all of the gross edge, because the average win is only a few times larger
+than the fee. `donchian_trend` is a deliberately different archetype: the
+classic [Turtle Trading](https://en.wikipedia.org/wiki/Turtle_Trading)
+system. Trade rarely, cut losses short, let winners run.
+
+- **Entry**: today's close breaks above the highest high of the prior
+  `--entry-period` bars (long) or below the lowest low (short) — the
+  breakout must be confirmed by the close, not just an intrabar poke, and
+  "prior" excludes the signal bar itself (no lookahead).
+- **Initial stop**: `--initial-stop-atr-multiple` × ATR(`--atr-period`)
+  from the entry price.
+- **Exit**: no fixed target. `--trailing-stop-atr-multiple` engages
+  `PatternBacktester`'s chandelier trailing stop — the stop ratchets
+  toward the best price seen since entry (`extreme_since_entry ∓
+  multiple*ATR`) and only ever tightens, never loosens. The trade rides
+  until the trailing stop catches it or the data ends (`eod_forced`).
+
+Run on daily bars specifically to minimize trade count against the fee
+schedule; intraday resolutions would multiply trade frequency and bring
+back the same fee problem the other strategies have.
+
+Real backtest, BTCUSD daily, full history available from Delta India
+(2023-12-29 → 2026-07-01, 916 candles — Delta's BTCUSD history doesn't go
+back further than that), 1% equity risk per trade, taker fees + 18% GST
+(realistic, no maker assumption):
+
+| entry period | trail ATR× | trades | win% | profit factor | fees as % of gross | net return |
+|---|---|---|---|---|---|---|
+| 20 | 3 | 33 | 39% | 1.47 | 8.4% | +7.3% |
+| 20 | 4 | 29 | 31% | 1.46 | 7.1% | +8.1% |
+| 55 | 4 | 13 | 46% | 2.05 | **3.7%** | +6.5% |
+
+Contrast with the mean-reversion strategies elsewhere in this README,
+where fees routinely ate 80-100%+ of gross P&L: here fees stay in the
+single digits because there are an order of magnitude fewer trades, each
+holding for days to weeks instead of hours. This is a genuine net-edge
+result, not a fee-optimization trick — but it comes with a trend-follower's
+usual honesty caveat: at `entry_period=55, trail=4` roughly 85% of the
+total net profit comes from a single trade (the Oct–Dec 2024 rally). That
+concentration is *characteristic* of this strategy family, not a red flag
+unique to this run — trend-followers are famous for a few outlier winners
+carrying the average — but it does mean the equity curve is lumpy and a
+short backtest window can easily miss (or be dominated by) the one trend
+that makes the year. Longer history and/or running across multiple
+uncorrelated markets (not just BTCUSD) is how real trend-following books
+manage that concentration risk; this backtest only has ~2.5 years of
+Delta India BTCUSD data to draw on.
+
+```bash
+python -m sol_backtest.main --symbol BTCUSD --start 2020-01-01 --end 2026-07-01 \
+    --resolution 1d --strategy donchian_trend --entry-period 55 \
+    --trailing-stop-atr-multiple 4 --risk-pct-per-trade 1
+```
+
 ## Pivot period: daily vs monthly (`--pivot-period`)
 
 `pivot_r1_rejection`, `pivot_r1_breakout`, and `pivot_ladder_rejection`

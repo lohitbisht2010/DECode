@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reward-multiple", type=float, default=None)
     p.add_argument("--max-consecutive-losses-per-day", type=int, default=None,
                     help="Applied identically to every strategy being compared - see main.py's help for details.")
+    p.add_argument("--trailing-stop-atr-multiple", type=float, default=None,
+                    help="Applied identically to every strategy being compared - see main.py's help for details.")
+    p.add_argument("--entry-period", type=int, default=20, help="donchian_trend: see main.py's help.")
+    p.add_argument("--initial-stop-atr-multiple", type=float, default=2.0, help="donchian_trend: see main.py's help.")
+    p.add_argument("--long-only", action="store_true", help="donchian_trend: see main.py's help.")
     p.add_argument("--maker", action="store_true",
                     help="Optimistic: assume maker fees on every fill. See main.py's help for the caveat.")
     p.add_argument("--maker-on-target-only", action="store_true",
@@ -59,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _build_strategy(name: str, daily_df, pivot_period: str):
+def _build_strategy(name: str, daily_df, pivot_period: str, args: argparse.Namespace):
     info = STRATEGIES[name]
     if info["kind"] != "pattern":
         raise ValueError(f"{name} is not a pattern-kind strategy; compare.py only supports pattern strategies")
@@ -68,6 +73,8 @@ def _build_strategy(name: str, daily_df, pivot_period: str):
         fast=10, slow=30,
         atr_period=10, supertrend_multiplier=3.0,
         pivot_period=pivot_period,
+        entry_period=args.entry_period, initial_stop_atr_multiple=args.initial_stop_atr_multiple,
+        long_only=args.long_only,
     )
     return info["factory"](ns, daily_df)
 
@@ -107,7 +114,7 @@ def main() -> None:
 
     results = {}
     for name in strategy_names:
-        strategy = _build_strategy(name, daily_df, args.pivot_period)
+        strategy = _build_strategy(name, daily_df, args.pivot_period, args)
         setups = strategy.generate_setups(df)
         backtester = PatternBacktester(
             fee_model=fee_model, initial_capital=args.capital, leverage=args.leverage,
@@ -115,6 +122,7 @@ def main() -> None:
             risk_pct_per_trade=args.risk_pct_per_trade, reward_multiple=args.reward_multiple,
             max_consecutive_losses_per_day=args.max_consecutive_losses_per_day,
             maker_on_target_only=args.maker_on_target_only,
+            trailing_stop_atr_multiple=args.trailing_stop_atr_multiple,
         )
         results[name] = backtester.run(df, setups)
         print(f"  {name}: {int(setups['entry_signal'].sum())} signals, {len(results[name].trades)} trades")

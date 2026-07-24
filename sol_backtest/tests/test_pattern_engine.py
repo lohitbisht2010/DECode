@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from sol_backtest.backtest.pattern_engine import PatternBacktester
 from sol_backtest.fees import FeeModel
@@ -517,3 +518,74 @@ def test_maker_on_target_only_overrides_assume_maker_fees():
     # even with assume_maker_fees=True, maker_on_target_only wins: this is a stop exit -> taker
     assert abs(trade.entry_fee - 200.0) < 1e-9
     assert abs(trade.exit_fee - 210.0) < 1e-9
+
+
+def _trailing_setups(n, signal_index, stop, target, atr_values, direction=1):
+    entry_signal = [False] * n
+    entry_signal[signal_index] = True
+    return pd.DataFrame({
+        "entry_signal": entry_signal,
+        "direction": [direction] * n,
+        "stop_price": [stop] * n,
+        "target_price": [target] * n,
+        "atr": atr_values,
+    })
+
+
+def test_trailing_stop_ratchets_up_and_locks_in_profit_for_a_long():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800, 2700, 3600],
+        "open": [100.0, 100.0, 108.0, 112.0, 108.0],
+        "high": [100.0, 105.0, 115.0, 110.0, 106.0],
+        "low": [100.0, 99.0, 104.0, 106.0, 104.0],
+        "close": [100.0, 104.0, 113.0, 108.0, 104.0],
+        "volume": [1, 1, 1, 1, 1],
+    })
+    # signal at bar0 -> entry at bar1 open (100), initial stop=90, trailing 2x ATR(=5)
+    setups = _trailing_setups(5, signal_index=0, stop=90.0, target=float("nan"),
+                               atr_values=[5.0] * 5, direction=1)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, trailing_stop_atr_multiple=2.0)
+    result = bt.run(df, setups)
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_price == 100.0
+    assert trade.exit_reason == "stop"
+    # trail after the bar1/bar2 high of 115 -> stop = 115 - 2*5 = 105, well above the initial 90
+    assert abs(trade.exit_price - 105.0) < 1e-9
+    assert trade.gross_pnl > 0  # trailing stop locked in a profit despite the later reversal
+
+
+def test_trailing_stop_never_loosens_even_if_atr_spikes():
+    df = pd.DataFrame({
+        "time": [0, 900, 1800, 2700],
+        "open": [100.0, 100.0, 103.0, 103.0],
+        "high": [100.0, 105.0, 105.0, 105.0],
+        "low": [100.0, 99.0, 100.0, 94.0],   # bar3's low (94) breaches the ratcheted stop (95) but is well above the naive-recomputed trail (65)
+        "close": [100.0, 104.0, 104.0, 97.0],
+        "volume": [1, 1, 1, 1],
+    })
+    # bar1: atr=5 -> trail = 105 - 2*5 = 95 (stop tightens from 90 to 95)
+    # bar2: atr spikes to 20, no new high -> naive trail = 105 - 2*20 = 65, but stop must NOT loosen back to 65
+    setups = _trailing_setups(4, signal_index=0, stop=90.0, target=float("nan"),
+                               atr_values=[5.0, 5.0, 20.0, 20.0], direction=1)
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, trailing_stop_atr_multiple=2.0)
+    result = bt.run(df, setups)
+
+    trade = result.trades[0]
+    assert trade.exit_reason == "stop"
+    assert abs(trade.exit_price - 95.0) < 1e-9  # stayed at the tighter 95, never loosened to 65
+
+
+def test_trailing_stop_requires_atr_column():
+    df = pd.DataFrame({
+        "time": [0, 900], "open": [100.0, 100.0], "high": [100.0, 101.0],
+        "low": [100.0, 99.0], "close": [100.0, 100.0], "volume": [1, 1],
+    })
+    setups = _setups(2, signal_index=0, stop=90.0, target=float("nan"), direction=1)  # no 'atr' column
+    bt = PatternBacktester(fee_model=_zero_fee(), initial_capital=10000, leverage=1,
+                            allocation_pct=100, trailing_stop_atr_multiple=2.0)
+    with pytest.raises(ValueError):
+        bt.run(df, setups)

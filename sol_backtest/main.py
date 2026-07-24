@@ -17,6 +17,10 @@ Examples:
 
     python -m sol_backtest.main --start 2025-01-01 --end 2026-01-01 \
         --resolution 15m --strategy supertrend_rejection
+
+    python -m sol_backtest.main --symbol BTCUSD --start 2022-01-01 --end 2026-01-01 \
+        --resolution 1d --strategy donchian_trend --entry-period 20 \
+        --trailing-stop-atr-multiple 3 --risk-pct-per-trade 1
 """
 import argparse
 from collections import Counter
@@ -29,6 +33,7 @@ from sol_backtest.config import RESOLUTION_SECONDS, base_url_for, settings
 from sol_backtest.data.fetcher import fetch_candles
 from sol_backtest.fees import FeeModel
 from sol_backtest.reporting import save_trades_csv
+from sol_backtest.strategies.donchian_trend import DonchianTrendStrategy
 from sol_backtest.strategies.pivot_ladder_rejection import PivotLadderRejectionStrategy
 from sol_backtest.strategies.pivot_r1_breakout import PivotR1BreakoutStrategy
 from sol_backtest.strategies.pivot_r1_rejection import PivotR1RejectionStrategy
@@ -82,6 +87,15 @@ STRATEGIES = {
         "needs_daily_data": False,
         "default_target_level": None,  # no fixed target - exits on trend flip
     },
+    "donchian_trend": {
+        "kind": "pattern",
+        "factory": lambda args, daily_df: DonchianTrendStrategy(
+            entry_period=args.entry_period, atr_period=args.atr_period,
+            initial_stop_atr_multiple=args.initial_stop_atr_multiple, allow_short=not args.long_only,
+        ),
+        "needs_daily_data": False,
+        "default_target_level": None,  # no fixed target - rides the trailing stop
+    },
 }
 
 DAILY_PIVOT_LOOKBACK_DAYS = 2     # daily pivots: only need yesterday's candle
@@ -116,8 +130,21 @@ def parse_args() -> argparse.Namespace:
                          "previous calendar month. Monthly levels are wider, so signals are rarer and - under "
                          "risk-based sizing - positions are smaller, since stop distance scales with level "
                          "spacing.")
-    p.add_argument("--atr-period", type=int, default=10, help="supertrend_rejection: ATR period")
+    p.add_argument("--atr-period", type=int, default=10,
+                    help="supertrend_rejection/donchian_trend: ATR period (used both for donchian_trend's "
+                         "initial stop and, if --trailing-stop-atr-multiple is set, the trailing stop)")
     p.add_argument("--supertrend-multiplier", type=float, default=3.0, help="supertrend_rejection: ATR multiplier")
+    p.add_argument("--entry-period", type=int, default=20,
+                    help="donchian_trend: breakout lookback in bars - long on a close above the highest high "
+                         "of the prior N bars, short on a close below the lowest low.")
+    p.add_argument("--initial-stop-atr-multiple", type=float, default=2.0,
+                    help="donchian_trend: initial stop distance in ATR multiples from the entry price, before "
+                         "the trailing stop takes over.")
+    p.add_argument("--trailing-stop-atr-multiple", type=float, default=None,
+                    help="Pattern strategies only: once in a trade, ratchet the stop toward the best price seen "
+                         "since entry - stop = extreme_since_entry -/+ this many ATR multiples - and never let "
+                         "it loosen. Required in practice for donchian_trend (which has no fixed target).")
+    p.add_argument("--long-only", action="store_true", help="donchian_trend: disable short entries")
     p.add_argument("--capital", type=float, default=settings.initial_capital)
     p.add_argument("--leverage", type=float, default=settings.leverage)
     p.add_argument("--allocation-pct", type=float, default=settings.allocation_pct,
@@ -203,6 +230,7 @@ def main() -> None:
             risk_pct_per_trade=args.risk_pct_per_trade, reward_multiple=args.reward_multiple,
             max_consecutive_losses_per_day=args.max_consecutive_losses_per_day,
             maker_on_target_only=args.maker_on_target_only,
+            trailing_stop_atr_multiple=args.trailing_stop_atr_multiple,
         )
         result = backtester.run(df, setups)
 
