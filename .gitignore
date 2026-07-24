@@ -7,3 +7,5 @@ venv/
 *.egg-info/
 sol_backtest/data/cache/
 sol_backtest/results/
+option_backtest/data/cache/
+option_backtest/results/
